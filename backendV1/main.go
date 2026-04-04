@@ -21,6 +21,7 @@ func main() {
 
 	// 建立 Gin 路由
 	r := gin.Default()
+	r.SetTrustedProxies(nil) 
 
 	// CORS 設定（允許前端 localhost:5173 連線）
 	r.Use(cors.New(cors.Config{
