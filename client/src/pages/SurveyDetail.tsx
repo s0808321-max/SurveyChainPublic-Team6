@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback } from "react";
 import { useParams, useLocation } from "wouter";
-import { surveyApi, participantApi, type Survey } from "@/lib/api";
+import { surveyApi, participantApi, type Survey, type RevealAnswersResponse } from "@/lib/api";
 import { useWallet } from "@/contexts/WalletContext";
 import { CONTRACT_ADDRESS, ethToWeiHex, getEtherscanTxUrl } from "@/lib/network";
 import { SURVEY_LOTTERY_ABI } from "@/lib/contractABI";
@@ -23,6 +23,10 @@ import {
   Shuffle,
   Copy,
   ArrowLeft,
+  BookOpen,
+  ShieldCheck,
+  ChevronDown,
+  ChevronUp,
 } from "lucide-react";
 import { Link } from "wouter";
 
@@ -65,6 +69,11 @@ export default function SurveyDetail() {
   const [isFunding, setIsFunding] = useState(false);
   const [isPayingEntryFee, setIsPayingEntryFee] = useState(false);
   const [entryFeeTxHash, setEntryFeeTxHash] = useState<string | null>(null); // 參與費交易 hash
+  // 公布答案相關 state
+  const [isRevealingAnswers, setIsRevealingAnswers] = useState(false);
+  const [revealResult, setRevealResult] = useState<RevealAnswersResponse | null>(null);
+  const [correctAnswers, setCorrectAnswers] = useState<Record<number, number[]>>({}); // questionId → correctOptionIds[]
+  const [showRevealPanel, setShowRevealPanel] = useState(false);
 
   const [survey, setSurvey] = useState<Survey | null>(null);
   const [isLoading, setIsLoading] = useState(true);
@@ -335,6 +344,131 @@ export default function SurveyDetail() {
     toast.success("地址已複製");
   };
 
+  // 切換公布答案面板的正確選項
+  const toggleCorrectOption = (questionId: number, optionId: number, isMultiple: boolean) => {
+    setCorrectAnswers((prev) => {
+      const current = prev[questionId] ?? [];
+      if (isMultiple) {
+        const updated = current.includes(optionId)
+          ? current.filter((id) => id !== optionId)
+          : [...current, optionId];
+        return { ...prev, [questionId]: updated };
+      } else {
+        return { ...prev, [questionId]: [optionId] };
+      }
+    });
+  };
+
+  // 公布答案：呼叫後端核對所有作答者
+  const handleRevealAnswers = async () => {
+    if (!address || !survey) return;
+    // 驗證所有選擇題都已設定正確答案
+    const gradableQuestions = (survey.questions ?? []).filter(
+      (q) => q.questionType !== "text"
+    );
+    for (const q of gradableQuestions) {
+      if (!correctAnswers[q.id] || correctAnswers[q.id].length === 0) {
+        toast.error(`請為第 ${q.orderIndex + 1} 題設定正確答案`);
+        return;
+      }
+    }
+    if (gradableQuestions.length === 0) {
+      toast.error("此問卷沒有選擇題，無法公布答案");
+      return;
+    }
+    setIsRevealingAnswers(true);
+    try {
+      const answersPayload = gradableQuestions.map((q) => ({
+        questionId: q.id,
+        correctOptionIds: correctAnswers[q.id] ?? [],
+      }));
+      const result = await surveyApi.revealAnswers(surveyId, {
+        callerAddress: address,
+        answers: answersPayload,
+      });
+      setRevealResult(result);
+      await fetchSurvey();
+      toast.success(
+        `答案公布完成！${result.qualifiedCount} 位完全答對，可進行抗签`,
+        { description: `共 ${result.totalParticipants} 位參與者，${result.gradedQuestionCount} 道題核對` }
+      );
+    } catch (err: unknown) {
+      const e = err as { message?: string };
+      toast.error("公布答案失敗", { description: e.message });
+    } finally {
+      setIsRevealingAnswers(false);
+    }
+  };
+
+  // 抽獎：從資格名單中用 Chainlink VRF 抽獎
+  const handleDrawFromQualified = async () => {
+    if (!window.ethereum || !address || !survey) return;
+    const onSepolia = await ensureSepoliaNetwork();
+    if (!onSepolia) return;
+    const contractAddr = survey.contractAddress || CONTRACT_ADDRESS;
+    if (!contractAddr) {
+      toast.error("合約尚未部署");
+      return;
+    }
+    // 取得資格名單
+    let qualifiedAddrs: string[] = [];
+    try {
+      const qualified = await surveyApi.getQualified(surveyId);
+      qualifiedAddrs = qualified.qualifiedAddresses;
+    } catch {
+      toast.error("無法取得資格名單");
+      return;
+    }
+    if (qualifiedAddrs.length === 0) {
+      toast.error("沒有符合資格的參與者，無法抽獎");
+      return;
+    }
+    setIsDrawing(true);
+    try {
+      // Step 1: 呼叫合約 revealAnswers(uint256, address[])
+      // function selector: 0x從 SurveyLottery_v2 ABI 取得
+      // keccak256("revealAnswers(uint256,address[])") = 0x6e7e5a7e
+      const revealSelector = "0x6e7e5a7e";
+      // 手動 ABI 編碼: surveyId(uint256) + offset(uint256) + length(uint256) + addresses[]
+      const surveyIdPadded = surveyId.toString(16).padStart(64, "0");
+      const offset = (64).toString(16).padStart(64, "0"); // offset to array = 0x40 = 64 bytes
+      const arrayLen = qualifiedAddrs.length.toString(16).padStart(64, "0");
+      const encodedAddrs = qualifiedAddrs
+        .map((a) => a.replace(/^0x/, "").toLowerCase().padStart(64, "0"))
+        .join("");
+      const encodedReveal = `${revealSelector}${surveyIdPadded}${offset}${arrayLen}${encodedAddrs}`;
+      const revealTxHash = await window.ethereum.request({
+        method: "eth_sendTransaction",
+        params: [{ from: address, to: contractAddr, data: encodedReveal, gas: "0x80000" }],
+      }) as string;
+      toast.info("資格名單已寫入合約", {
+        description: `${qualifiedAddrs.length} 位資格參與者已登記`,
+        action: { label: "查看交易", onClick: () => window.open(getEtherscanTxUrl(revealTxHash), "_blank") },
+      });
+      // Step 2: 呼叫合約 requestLottery（觸發 Chainlink VRF）
+      const lotterySelector = "0x8a4068dd"; // requestLottery(uint256)
+      const surveyIdHex = surveyId.toString(16).padStart(64, "0");
+      const lotteryData = `${lotterySelector}${surveyIdHex}`;
+      const lotteryTxHash = await window.ethereum.request({
+        method: "eth_sendTransaction",
+        params: [{ from: address, to: contractAddr, data: lotteryData, gas: "0x50000" }],
+      }) as string;
+      toast.info("Chainlink VRF 抽獎請求已送出", {
+        description: "等待 Chainlink 節點回調（約30-60 秒），回調完成後中獎者將自動收到 ETH",
+        duration: 8000,
+        action: { label: "查看交易", onClick: () => window.open(getEtherscanTxUrl(lotteryTxHash), "_blank") },
+      });
+      // 同步後端資料庫（記錄抽獎交易 hash）
+      await surveyApi.draw(surveyId, { callerAddress: address, drawTransactionHash: lotteryTxHash });
+      await fetchSurvey();
+    } catch (err: unknown) {
+      const e = err as { code?: number; message?: string };
+      if (e.code !== 4001) toast.error("抽獎請求失敗", { description: e.message });
+    } finally {
+      setIsDrawing(false);
+    }
+  };
+
   if (isLoading) {
     return (
       <div className="container py-8 max-w-4xl mx-auto space-y-4">
@@ -525,23 +659,126 @@ export default function SurveyDetail() {
                   </Button>
                 </div>
               )}
-              {(survey.status === "active" || survey.status === "ended") && isDeadlinePassed && (
-                <div className="flex items-center justify-between p-3 bg-white rounded-lg border border-blue-100">
-                  <div>
-                    <p className="text-sm font-medium">執行抽獎</p>
-                    <p className="text-xs text-muted-foreground">
-                      從 {survey.participantCount} 位參與者中抽出 {survey.winnerCount} 位中獎者
-                    </p>
+              {/* 步驟一：公布答案（問卷截止後且尚未公布） */}
+              {(survey.status === "active" || survey.status === "ended") && isDeadlinePassed && !revealResult && !survey.qualifiedAddresses && (
+                <div className="space-y-3">
+                  <div className="flex items-center justify-between p-3 bg-white rounded-lg border border-blue-100">
+                    <div>
+                      <p className="text-sm font-medium">步驟一：公布正確答案</p>
+                      <p className="text-xs text-muted-foreground">
+                        設定每道題的正確答案，系統自動核對 {survey.participantCount} 位作答者
+                      </p>
+                    </div>
+                    <Button
+                      size="sm"
+                      onClick={() => setShowRevealPanel(!showRevealPanel)}
+                      className="gap-2 bg-indigo-600 hover:bg-indigo-700 text-white border-0"
+                    >
+                      <BookOpen className="w-4 h-4" />
+                      {showRevealPanel ? (
+                        <><ChevronUp className="w-3 h-3" />收起</>
+                      ) : (
+                        <>設定答案<ChevronDown className="w-3 h-3" /></>
+                      )}
+                    </Button>
                   </div>
-                  <Button
-                    size="sm"
-                    onClick={handleDraw}
-                    disabled={isDrawing || survey.participantCount === 0}
-                    className="gap-2 bg-purple-600 hover:bg-purple-700 text-white border-0"
-                  >
-                    <Shuffle className="w-4 h-4" />
-                    {isDrawing ? "抽獎中..." : "執行抽獎"}
-                  </Button>
+
+                  {/* 公布答案面板 */}
+                  {showRevealPanel && (
+                    <div className="p-4 bg-white rounded-xl border border-indigo-100 space-y-4">
+                      <p className="text-xs text-muted-foreground">請為每道選擇題勾選正確答案，文字題不需設定。</p>
+                      {(survey.questions ?? []).filter((q) => q.questionType !== "text").map((q, qi) => (
+                        <div key={q.id} className="space-y-2">
+                          <p className="text-sm font-medium">
+                            <span className="text-indigo-600 font-bold mr-1">Q{qi + 1}.</span>
+                            {q.questionText}
+                            <span className="text-xs text-muted-foreground ml-2">
+                              ({q.questionType === "multiple" ? "多選" : "單選"})
+                            </span>
+                          </p>
+                          <div className="space-y-1 ml-4">
+                            {(q.options ?? []).map((opt) => {
+                              const isSelected = correctAnswers[q.id]?.includes(opt.id) ?? false;
+                              return (
+                                <button
+                                  key={opt.id}
+                                  onClick={() => toggleCorrectOption(q.id, opt.id, q.questionType === "multiple")}
+                                  className={`w-full text-left px-3 py-2 rounded-lg border text-sm transition-all ${
+                                    isSelected
+                                      ? "border-green-400 bg-green-50 text-green-800 font-medium"
+                                      : "border-border hover:border-green-300 hover:bg-green-50/50"
+                                  }`}
+                                >
+                                  <span className={`inline-flex items-center justify-center w-4 h-4 rounded-${q.questionType === "multiple" ? "md" : "full"} border mr-2 text-xs shrink-0 ${
+                                    isSelected ? "border-green-500 bg-green-500 text-white" : "border-muted-foreground"
+                                  }`}>
+                                    {isSelected && "✓"}
+                                  </span>
+                                  {opt.optionText}
+                                </button>
+                              );
+                            })}
+                          </div>
+                        </div>
+                      ))}
+                      <Button
+                        onClick={handleRevealAnswers}
+                        disabled={isRevealingAnswers}
+                        className="w-full gap-2 bg-indigo-600 hover:bg-indigo-700 text-white border-0"
+                      >
+                        <ShieldCheck className="w-4 h-4" />
+                        {isRevealingAnswers ? "核對中...請稍候" : "確認答案並核對作答者"}
+                      </Button>
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {/* 步驟二：顯示核對結果，觸發 Chainlink VRF 抽獎 */}
+              {(revealResult || survey.qualifiedAddresses) && survey.status !== "drawn" && (
+                <div className="space-y-3">
+                  {/* 資格名單結果卡片 */}
+                  <div className="p-4 bg-green-50 rounded-xl border border-green-200">
+                    <div className="flex items-center gap-2 mb-2">
+                      <ShieldCheck className="w-5 h-5 text-green-600" />
+                      <p className="font-semibold text-green-800 text-sm">答案已公布，資格名單已確定</p>
+                    </div>
+                    {revealResult && (
+                      <div className="grid grid-cols-3 gap-2 mt-2 text-center">
+                        <div className="bg-white rounded-lg p-2 border border-green-100">
+                          <p className="text-lg font-bold text-slate-800">{revealResult.totalParticipants}</p>
+                          <p className="text-xs text-muted-foreground">總參與者</p>
+                        </div>
+                        <div className="bg-white rounded-lg p-2 border border-green-100">
+                          <p className="text-lg font-bold text-green-700">{revealResult.qualifiedCount}</p>
+                          <p className="text-xs text-muted-foreground">資格人數</p>
+                        </div>
+                        <div className="bg-white rounded-lg p-2 border border-green-100">
+                          <p className="text-lg font-bold text-indigo-700">{revealResult.gradedQuestionCount}</p>
+                          <p className="text-xs text-muted-foreground">核對題數</p>
+                        </div>
+                      </div>
+                    )}
+                  </div>
+
+                  {/* 步驟二：觸發抽獎按鈕 */}
+                  <div className="flex items-center justify-between p-3 bg-white rounded-lg border border-purple-100">
+                    <div>
+                      <p className="text-sm font-medium">步驟二：觸發 Chainlink VRF 抽獎</p>
+                      <p className="text-xs text-muted-foreground">
+                        從 {revealResult?.qualifiedCount ?? "?"} 位完全答對者中抗出 {survey.winnerCount} 位中獎者
+                      </p>
+                    </div>
+                    <Button
+                      size="sm"
+                      onClick={handleDrawFromQualified}
+                      disabled={isDrawing || (revealResult?.qualifiedCount ?? 0) === 0}
+                      className="gap-2 bg-purple-600 hover:bg-purple-700 text-white border-0"
+                    >
+                      <Shuffle className="w-4 h-4" />
+                      {isDrawing ? "抽獎中...請稍候" : "Chainlink VRF 抽獎"}
+                    </Button>
+                  </div>
                 </div>
               )}
             </CardContent>
