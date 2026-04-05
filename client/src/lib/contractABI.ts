@@ -192,6 +192,85 @@ export const SURVEY_LOTTERY_ABI = [
       { name: "rewardPerWinner", type: "uint256", indexed: false },
     ],
   },
+  // ─── 提領相關函數 ──────────────────────────────────────────────────────────
+
+  /**
+   * claimPrize：中獎者提領單一問卷的獎金
+   * @param surveyId 問卷 ID
+   */
+  {
+    name: "claimPrize",
+    type: "function",
+    stateMutability: "nonpayable",
+    inputs: [{ name: "surveyId", type: "uint256" }],
+    outputs: [],
+  },
+
+  /**
+   * claimMultiplePrizes：批量提領多個問卷的獎金
+   * @param surveyIds 問卷 ID 陣列
+   */
+  {
+    name: "claimMultiplePrizes",
+    type: "function",
+    stateMutability: "nonpayable",
+    inputs: [{ name: "surveyIds", type: "uint256[]" }],
+    outputs: [],
+  },
+
+  /**
+   * getPendingReward：查詢某用戶在指定問卷的待提領金額
+   */
+  {
+    name: "getPendingReward",
+    type: "function",
+    stateMutability: "view",
+    inputs: [
+      { name: "surveyId", type: "uint256" },
+      { name: "user", type: "address" },
+    ],
+    outputs: [{ name: "", type: "uint256" }],
+  },
+
+  /**
+   * getTotalPendingReward：批量查詢某用戶在多個問卷的待提領總金額
+   */
+  {
+    name: "getTotalPendingReward",
+    type: "function",
+    stateMutability: "view",
+    inputs: [
+      { name: "user", type: "address" },
+      { name: "surveyIds", type: "uint256[]" },
+    ],
+    outputs: [{ name: "total", type: "uint256" }],
+  },
+
+  /**
+   * isWinner：查詢某用戶是否為指定問卷的中獎者
+   */
+  {
+    name: "isWinner",
+    type: "function",
+    stateMutability: "view",
+    inputs: [
+      { name: "surveyId", type: "uint256" },
+      { name: "user", type: "address" },
+    ],
+    outputs: [{ name: "", type: "bool" }],
+  },
+
+  // ─── 提領相關事件 ──────────────────────────────────────────────────────────
+
+  {
+    name: "RewardClaimed",
+    type: "event",
+    inputs: [
+      { name: "surveyId", type: "uint256", indexed: true },
+      { name: "winner", type: "address", indexed: true },
+      { name: "amount", type: "uint256", indexed: false },
+    ],
+  },
 ] as const;
 
 export type SurveyStatus = 0 | 1 | 2; // 0: Active, 1: Drawn, 2: Cancelled

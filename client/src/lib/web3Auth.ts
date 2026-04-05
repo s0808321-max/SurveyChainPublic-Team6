@@ -20,38 +20,34 @@ export async function loginWithWallet(
   }
 
   try {
-    // ── 步驟一：向 Go 後端取得 nonce 與待簽名訊息 ──────────────────────────
-    const nonceRes = await fetch("/api/auth/nonce", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ walletAddress }),
-    });
+    // ── 步驟一：向 Go 後端取得 nonce（改為 GET，與 useAuth.ts 統一） ────────
+    const nonceRes = await fetch(
+      `/api/auth/nonce?wallet=${encodeURIComponent(walletAddress.toLowerCase())}`
+    );
 
     if (!nonceRes.ok) {
       const err = await nonceRes.json();
       return { success: false, error: err.error || "取得 nonce 失敗" };
     }
 
-    const { nonce, message } = await nonceRes.json();
+    const { nonce } = await nonceRes.json();
 
-    // ── 步驟二：請求 MetaMask 對訊息簽名 ────────────────────────────────────
+    // ── 步驟二：請求 MetaMask 對 nonce 簽名 ─────────────────────────────────
     // personal_sign 會在訊息前加上 "\x19Ethereum Signed Message:\n" 前綴
-    // 這與後端 accounts.TextHash() 的計算方式一致
+    // 這與後端驗證方式一致
     const signature = await window.ethereum.request({
       method: "personal_sign",
-      params: [message, walletAddress],
+      params: [nonce, walletAddress],
     }) as string;
 
     // ── 步驟三：將簽名送到 Go 後端驗證 ──────────────────────────────────────
     const verifyRes = await fetch("/api/auth/verify", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      credentials: "include", // 允許後端設定 Cookie
+      credentials: "include",
       body: JSON.stringify({
-        walletAddress,
-        nonce,
+        wallet: walletAddress.toLowerCase(),
         signature,
-        message,
       }),
     });
 
@@ -61,7 +57,7 @@ export async function loginWithWallet(
     }
 
     const data = await verifyRes.json();
-    return { success: true, walletAddress: data.walletAddress };
+    return { success: true, walletAddress: data.wallet };
   } catch (error: unknown) {
     const err = error as { code?: number; message?: string };
     // MetaMask 用戶拒絕簽名

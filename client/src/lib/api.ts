@@ -47,6 +47,7 @@ export interface SurveyQuestion {
   isRequired: boolean;
   createdAt: string;
   options?: QuestionOption[];
+  qualifiedAddresses?: string[] | null;  // ← 新增這行
 }
 
 export interface Survey {
@@ -63,6 +64,8 @@ export interface Survey {
   transactionHash?: string | null;
   winnerAddresses?: string | null;
   drawTransactionHash?: string | null;
+  /** 公布答案後由後端回傳的資格名單（格式依後端而定） */
+  qualifiedAddresses?: string | string[] | null;
   entryFee: string;
   entryFeeCollected: string;
   createdAt: string;
@@ -71,6 +74,14 @@ export interface Survey {
   participantCount?: number;
 }
 
+/** 公布正確答案後，後端核對參與者作答的結果 */
+export interface RevealAnswersResponse {
+  success: boolean;
+  qualifiedCount: number;
+  totalParticipants: number;
+  gradedQuestionCount: number;
+  qualifiedAddresses: string[];
+}
 export interface SurveyWithCount extends Survey {
   participantCount: number;
 }
@@ -151,6 +162,29 @@ export const surveyApi = {
       method: "POST",
       body: JSON.stringify(data),
     }),
+
+  /** 創建者公布選擇題正確答案，後端核對並產生完全答對名單 */
+  revealAnswers: (
+    id: number,
+    data: {
+      callerAddress: string;
+      answers: {
+        questionId: number;
+        correctOptionIds: number[];
+      }[];
+    }
+  ): Promise<RevealAnswersResponse> =>
+    request(`/surveys/${id}/answers`, {
+      method: "POST",
+      body: JSON.stringify(data),
+    }),
+
+  /** 取得可進入鏈上抽獎的資格地址列表 */
+  getQualified: (id: number): Promise<{
+    success: boolean;
+    qualifiedCount: number;
+    qualifiedAddresses: string[];
+  }> => request(`/surveys/${id}/qualified`),
 };
 
 // ─── 參與者 API ───────────────────────────────────────────────────────────────
