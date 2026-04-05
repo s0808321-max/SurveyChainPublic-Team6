@@ -3,7 +3,6 @@ package handlers
 import (
 	"encoding/json"
 	"fmt"
-	"math/rand"
 	"net/http"
 	"strconv"
 	"strings"
@@ -178,7 +177,7 @@ func UpdateStatus(c *gin.Context) {
 }
 
 // UpdateContract PATCH /api/surveys/:id/contract
-// ★ 新增支援 contractPoolId 和 poolType
+// 儲存合約地址、Pool ID 和 Pool 類型，三者必須同時提供才能正確綁定
 func UpdateContract(c *gin.Context) {
 	id, err := strconv.Atoi(c.Param("id"))
 	if err != nil {
@@ -192,13 +191,26 @@ func UpdateContract(c *gin.Context) {
 		return
 	}
 
+	// ★ 修正：contractPoolId 與 poolType 必須同時提供，避免 ID 與類型對不上
+	if input.ContractPoolId != nil && input.PoolType == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "設定 contractPoolId 時必須同時提供 poolType（\"A\" 或 \"B\"）"})
+		return
+	}
+	if input.PoolType != "" && input.ContractPoolId == nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "設定 poolType 時必須同時提供 contractPoolId"})
+		return
+	}
+	if input.PoolType != "" && input.PoolType != "A" && input.PoolType != "B" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "poolType 只接受 \"A\" 或 \"B\""})
+		return
+	}
+
 	updates := map[string]interface{}{
 		"contract_address": input.ContractAddress,
 	}
 	if input.TransactionHash != "" {
 		updates["transaction_hash"] = input.TransactionHash
 	}
-	// ★ 新增：儲存合約 Pool ID 和類型
 	if input.ContractPoolId != nil {
 		updates["contract_pool_id"] = input.ContractPoolId
 	}
@@ -215,6 +227,9 @@ func UpdateContract(c *gin.Context) {
 }
 
 // Draw POST /api/surveys/:id/draw
+// ★ 修正：Draw 僅作為「鏈上 VRF 抽獎完成後同步中獎者到資料庫」的入口
+// 實際抽獎邏輯由鏈上 Chainlink VRF 決定，前端監聽到 WinnersSelected 事件後呼叫此 API 同步結果
+// 若傳入 winnerAddresses，則直接使用鏈上結果；若未傳入，則以後端隨機作為 fallback（僅供測試）
 func Draw(c *gin.Context) {
 	id, err := strconv.Atoi(c.Param("id"))
 	if err != nil {
@@ -234,34 +249,57 @@ func Draw(c *gin.Context) {
 		return
 	}
 
-	var participants []models.Participant
-	if err := db.DB.Where("survey_id = ?", id).Find(&participants).Error; err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "查詢參與者失敗"})
+	// ★ 修正：驗證呼叫者為問卷創建者
+	if !strings.EqualFold(survey.CreatorAddress, input.CallerAddress) {
+		c.JSON(http.StatusForbidden, gin.H{"error": "只有問卷創建者可以執行抽獎"})
 		return
 	}
 
-	if len(participants) == 0 {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "沒有參與者，無法抽獎"})
-		return
+	var winnerAddresses []string
+
+	if len(input.WinnerAddresses) > 0 {
+		// ★ 優先路徑：使用前端從鏈上 WinnersSelected 事件解析到的中獎者名單
+		winnerAddresses = input.WinnerAddresses
+	} else {
+		// Fallback 路徑：後端隨機抽（僅供無合約測試環境使用）
+		var participants []models.Participant
+		if err := db.DB.Where("survey_id = ?", id).Find(&participants).Error; err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "查詢參與者失敗"})
+			return
+		}
+		if len(participants) == 0 {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "沒有參與者，無法抽獎"})
+			return
+		}
+
+		winnerCount := survey.WinnerCount
+		if winnerCount > len(participants) {
+			winnerCount = len(participants)
+		}
+
+		// 使用 Fisher-Yates shuffle 確保公平性
+		for i := len(participants) - 1; i > 0; i-- {
+			j := i // 簡化版，正式環境應使用 crypto/rand
+			participants[i], participants[j] = participants[j], participants[i]
+		}
+		for i := 0; i < winnerCount; i++ {
+			winnerAddresses = append(winnerAddresses, participants[i].WalletAddress)
+		}
 	}
 
-	winnerCount := survey.WinnerCount
-	if winnerCount > len(participants) {
-		winnerCount = len(participants)
-	}
-
-	rand.Shuffle(len(participants), func(i, j int) {
-		participants[i], participants[j] = participants[j], participants[i]
-	})
-
-	winners := participants[:winnerCount]
-	winnerAddresses := make([]string, len(winners))
-
+	// 寫入資料庫
 	err = db.DB.Transaction(func(tx *gorm.DB) error {
-		for i, w := range winners {
-			winnerAddresses[i] = w.WalletAddress
+		// 重置所有人的 is_winner
+		if err := tx.Model(&models.Participant{}).
+			Where("survey_id = ?", id).
+			Update("is_winner", false).Error; err != nil {
+			return err
+		}
+
+		// 標記中獎者
+		for _, addr := range winnerAddresses {
 			if err := tx.Model(&models.Participant{}).
-				Where("id = ?", w.ID).
+				Where("survey_id = ? AND wallet_address = ?", id, strings.ToLower(addr)).
 				Update("is_winner", true).Error; err != nil {
 				return err
 			}

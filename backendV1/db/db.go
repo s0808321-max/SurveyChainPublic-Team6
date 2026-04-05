@@ -33,6 +33,7 @@ func Init() {
 		&models.Option{},
 		&models.Participant{},
 		&models.Submission{},
+		&models.SurveyAnswer{}, // ★ 修正：補上 SurveyAnswer，否則 PublishAnswers 會失敗
 	)
 	if err != nil {
 		log.Fatalf("AutoMigrate 失敗: %v", err)

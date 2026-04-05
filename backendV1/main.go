@@ -2,6 +2,7 @@ package main
 
 import (
 	"log"
+	"os"
 	"web3survey/db"
 	"web3survey/routes"
 
@@ -16,16 +17,27 @@ func main() {
 		log.Println("未找到 .env 檔案，使用系統環境變數")
 	}
 
+	// ★ 修正：正式環境若未設定 JWT_SECRET 則警告，防止使用預設值導致安全漏洞
+	if os.Getenv("JWT_SECRET") == "" {
+		log.Println("[警告] JWT_SECRET 未設定，目前使用開發預設值。正式環境請務必在 .env 設定此變數！")
+	}
+
 	// 初始化資料庫
 	db.Init()
 
 	// 建立 Gin 路由
 	r := gin.Default()
-	r.SetTrustedProxies(nil) 
+	r.SetTrustedProxies(nil)
 
-	// CORS 設定（允許前端 localhost:5173 連線）
+	// ★ 修正：從環境變數讀取允許的前端 Origin，支援正式部署
+	allowOrigins := []string{"http://localhost:5173", "http://localhost:3000"}
+	if frontendURL := os.Getenv("FRONTEND_URL"); frontendURL != "" {
+		allowOrigins = append(allowOrigins, frontendURL)
+	}
+
+	// CORS 設定
 	r.Use(cors.New(cors.Config{
-		AllowOrigins:     []string{"http://localhost:5173", "http://localhost:3000"},
+		AllowOrigins:     allowOrigins,
 		AllowMethods:     []string{"GET", "POST", "PATCH", "DELETE", "OPTIONS"},
 		AllowHeaders:     []string{"Origin", "Content-Type", "Authorization"},
 		AllowCredentials: true,

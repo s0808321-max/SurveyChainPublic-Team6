@@ -126,6 +126,8 @@ type UpdateContractInput struct {
 }
 
 type DrawInput struct {
+	// ★ 新增：鏈上 WinnersSelected 事件解析到的中獎者，優先於後端隨機抽
+	WinnerAddresses     []string `json:"winnerAddresses"`
 	CallerAddress       string `json:"callerAddress" binding:"required"`
 	DrawTransactionHash string `json:"drawTransactionHash"`
 }

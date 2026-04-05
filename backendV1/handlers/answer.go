@@ -107,7 +107,7 @@ func GetQualifiedParticipants(c *gin.Context) {
 	}
 
 	// 逐一核對每位參與者的答案
-	qualifiedWallets := []string{}
+	qualifiedAddresses := []string{}
 
 	for _, p := range participants {
 		var submissions []models.Submission
@@ -127,14 +127,14 @@ func GetQualifiedParticipants(c *gin.Context) {
 		}
 
 		if allCorrect {
-			qualifiedWallets = append(qualifiedWallets, p.WalletAddress)
+			qualifiedAddresses = append(qualifiedAddresses, p.WalletAddress)
 		}
 	}
 
 	c.JSON(http.StatusOK, gin.H{
 		"success":          true,
-		"qualifiedCount":   len(qualifiedWallets),
-		"qualifiedWallets": qualifiedWallets,
+		"qualifiedCount":   len(qualifiedAddresses),
+		"qualifiedAddresses": qualifiedAddresses,
 	})
 }
 
