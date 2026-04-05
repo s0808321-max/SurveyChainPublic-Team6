@@ -21,6 +21,9 @@ type Survey struct {
 	DrawTransactionHash *string    `json:"drawTransactionHash"`
 	EntryFee            string     `gorm:"default:'0'" json:"entryFee"`
 	EntryFeeCollected   string     `gorm:"default:'0'" json:"entryFeeCollected"`
+	QualifiedAddresses  *string    `json:"qualifiedAddresses"`
+	ContractPoolId      *int       `json:"contractPoolId"` // ★ 新增：合約裡的 Pool ID
+	PoolType            *string    `json:"poolType"`       // ★ 新增："A" 或 "B"
 	CreatedAt           time.Time  `json:"createdAt"`
 	UpdatedAt           time.Time  `json:"updatedAt"`
 
@@ -33,7 +36,7 @@ type Question struct {
 	ID           uint      `gorm:"primaryKey;autoIncrement" json:"id"`
 	SurveyID     uint      `gorm:"not null;index" json:"surveyId"`
 	QuestionText string    `gorm:"not null" json:"questionText"`
-	QuestionType string    `gorm:"not null" json:"questionType"` // single, multiple, text
+	QuestionType string    `gorm:"not null" json:"questionType"`
 	OrderIndex   int       `gorm:"default:0" json:"orderIndex"`
 	IsRequired   bool      `gorm:"default:true" json:"isRequired"`
 	CreatedAt    time.Time `json:"createdAt"`
@@ -41,7 +44,7 @@ type Question struct {
 	Options []Option `gorm:"foreignKey:QuestionID" json:"options,omitempty"`
 }
 
-// Option 選項（單選／多選題用）
+// Option 選項
 type Option struct {
 	ID         uint   `gorm:"primaryKey;autoIncrement" json:"id"`
 	QuestionID uint   `gorm:"not null;index" json:"questionId"`
@@ -66,16 +69,16 @@ type Submission struct {
 	ParticipantID     uint   `gorm:"not null;index" json:"participantId"`
 	QuestionID        uint   `gorm:"not null;index" json:"questionId"`
 	AnswerText        string `json:"answerText"`
-	SelectedOptionIDs string `json:"selectedOptionIds"` // JSON 字串，例如 [1,3]
+	SelectedOptionIDs string `json:"selectedOptionIds"`
 }
 
-// SurveyAnswer 正確答案（發題者公布用）★ 新增
+// SurveyAnswer 正確答案
 type SurveyAnswer struct {
 	ID                uint   `gorm:"primaryKey;autoIncrement" json:"id"`
 	SurveyID          uint   `gorm:"not null;index" json:"surveyId"`
 	QuestionID        uint   `gorm:"not null;index" json:"questionId"`
-	CorrectAnswerText string `json:"correctAnswerText"` // 文字題正確答案
-	CorrectOptionIDs  string `json:"correctOptionIds"`  // JSON 字串，例如 [1,3]
+	CorrectAnswerText string `json:"correctAnswerText"`
+	CorrectOptionIDs  string `json:"correctOptionIds"`
 }
 
 // ─── DTO ─────────────────────────────────────────────────────────────────────
@@ -114,9 +117,12 @@ type UpdateStatusInput struct {
 	DrawTransactionHash string   `json:"drawTransactionHash"`
 }
 
+// UpdateContractInput ★ 新增 ContractPoolId 和 PoolType
 type UpdateContractInput struct {
 	ContractAddress string `json:"contractAddress" binding:"required"`
 	TransactionHash string `json:"transactionHash"`
+	ContractPoolId  *int   `json:"contractPoolId"` // ★ 新增
+	PoolType        string `json:"poolType"`       // ★ 新增："A" 或 "B"
 }
 
 type DrawInput struct {
@@ -137,13 +143,11 @@ type AnswerInput struct {
 	SelectedOptionIDs []int  `json:"selectedOptionIds"`
 }
 
-// PublishAnswersInput 發題者公布正確答案的輸入格式 ★ 新增
 type PublishAnswersInput struct {
-	CallerAddress string              `json:"callerAddress" binding:"required"`
+	CallerAddress string               `json:"callerAddress" binding:"required"`
 	Answers       []CorrectAnswerInput `json:"answers" binding:"required,min=1"`
 }
 
-// CorrectAnswerInput 單道題目的正確答案 ★ 新增
 type CorrectAnswerInput struct {
 	QuestionID        uint   `json:"questionId" binding:"required"`
 	CorrectAnswerText string `json:"correctAnswerText"`
