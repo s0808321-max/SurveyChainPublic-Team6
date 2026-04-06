@@ -86,13 +86,13 @@
 
 ## 5. 重新產生本表之指令（可選）
 
-在 `frontendV1/client` 目錄下已安裝 `ethers` 時，可用下列方式重算 selector（範例）：
+在 `frontend/client` 目錄下已安裝 `ethers` 時，可用下列方式重算 selector（範例）：
 
 ```bash
-cd frontendV1/client
+cd frontend/client
 node -e "const {Interface}=require('ethers'); const i=new Interface(['function drawA(uint256)']); console.log(i.getFunction('drawA').selector);"
 ```
 
 ---
 
-*本文件依倉庫內 `contractsV1/.../SurveyChainSystem.sol` 與 `frontendV1/client/src/lib/contractABI.ts` 整理；合約改版後請同步更新。*
+*本文件依倉庫內 `contract/.../SurveyChainSystem.sol` 與 `frontend/client/src/lib/contractABI.ts` 整理；合約改版後請同步更新。*

@@ -18,7 +18,7 @@
 
 ## 1. 啟動 PostgreSQL
 
-**方式 A：Docker（與 `backendV1/README.md` 範例一致）**
+**方式 A：Docker（與 `backend/README.md` 範例一致）**
 
 ```bash
 docker run -d \
@@ -34,10 +34,10 @@ docker run -d \
 
 ---
 
-## 2. 設定並啟動 Go 後端（`backendV1`）
+## 2. 設定並啟動 Go 後端（`backend`）
 
 ```bash
-cd backendV1
+cd backend
 cp .env.example .env
 ```
 
@@ -72,10 +72,10 @@ go run .
 
 ---
 
-## 3. 安裝並啟動前端（`frontendV1/client`）
+## 3. 安裝並啟動前端（`frontend/client`）
 
 ```bash
-cd frontendV1/client
+cd frontend/client
 npm install
 npm run dev
 ```
@@ -86,7 +86,7 @@ npm run dev
 
 ### 前端環境變數（選用）
 
-在 `frontendV1/client` 新增 **`.env`** 或 **`.env.local`**（Vite 會讀取 `VITE_` 前綴）：
+在 `frontend/client` 新增 **`.env`** 或 **`.env.local`**（Vite 會讀取 `VITE_` 前綴）：
 
 ```env
 # 已部署到 Sepolia 的合約位址；未設時仍可測「純後端問卷」流程，但建立問卷後自動上鏈等步驟會跳過或失敗
@@ -114,7 +114,7 @@ VITE_CONTRACT_ADDRESS=0x你的合約位址
 
 1. MetaMask 切換到 **Sepolia**（前端 `WalletContext` 會引導）。
 2. 設定 **`VITE_CONTRACT_ADDRESS`** 為已部署合約。
-3. 依團隊部署流程準備 **Chainlink VRF** 等（`SurveyChainSystem` 建構子需 subscription id）；細節以 `contractsV1` 部署文件為準（目前倉庫內 README 較簡略，需自行對照 Hardhat/Foundry 專案若有的話）。
+3. 依團隊部署流程準備 **Chainlink VRF** 等（`SurveyChainSystem` 建構子需 subscription id）；細節以 `contract` 部署文件為準（目前倉庫內 README 較簡略，需自行對照 Hardhat/Foundry 專案若有的話）。
 
 ---
 
@@ -133,9 +133,9 @@ VITE_CONTRACT_ADDRESS=0x你的合約位址
 ## 6. 一鍵檢查清單
 
 - [ ] PostgreSQL 可連線，`web3survey` 資料庫存在  
-- [ ] `backendV1/.env` 已設定且 `go run .` 成功  
+- [ ] `backend/.env` 已設定且 `go run .` 成功  
 - [ ] `curl http://127.0.0.1:8080/health` 為 ok  
-- [ ] `frontendV1/client` 已 `npm install` 且 `npm run dev`  
+- [ ] `frontend/client` 已 `npm install` 且 `npm run dev`  
 - [ ] 瀏覽器可開 http://localhost:5173  
 - [ ] （選用）`VITE_CONTRACT_ADDRESS` + Sepolia ETH + MetaMask  
 

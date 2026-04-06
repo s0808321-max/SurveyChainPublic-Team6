@@ -10,9 +10,9 @@
 
 | 區塊 | 技術 | 角色 |
 |------|------|------|
-| **backendV1** | Go（Gin） | HTTP API、JWT 認證、PostgreSQL（GORM） |
-| **frontendV1** | React + Vite + TypeScript | 問卷 UI、錢包（MetaMask）、呼叫後端與鏈上交易 |
-| **contractsV1** | Solidity | `SurveyChainSystem`：獎池、參與、Chainlink VRF 抽獎等 |
+| **backend** | Go（Gin） | HTTP API、JWT 認證、PostgreSQL（GORM） |
+| **frontend** | React + Vite + TypeScript | 問卷 UI、錢包（MetaMask）、呼叫後端與鏈上交易 |
+| **contract** | Solidity | `SurveyChainSystem`：獎池、參與、Chainlink VRF 抽獎等 |
 
 ---
 
@@ -26,7 +26,7 @@ SurveyChainPublic-Team6/
 ├── README.md
 ├── docs/
 │   └── PROJECT_ARCHITECTURE.md    # 本文件
-├── backendV1/
+├── backend/
 │   ├── main.go
 │   ├── go.mod, go.sum
 │   ├── .env.example, .gitignore, README.md
@@ -43,12 +43,12 @@ SurveyChainPublic-Team6/
 │   │   └── models.go
 │   └── routes/
 │       └── routes.go
-├── contractsV1/
+├── contract/
 │   ├── README.md
 │   └── contracts/
 │       └── contracts/
 │           └── SurveyChainSystem.sol
-└── frontendV1/
+└── frontend/
     ├── README.md
     ├── SurveyChain Structure.md
     ├── todo.md
@@ -92,7 +92,7 @@ SurveyChainPublic-Team6/
 
 ## 3. 各目錄職責
 
-### 3.1 `frontendV1/client`
+### 3.1 `frontend/client`
 
 | 區域 | 職責 |
 |------|------|
@@ -104,7 +104,7 @@ SurveyChainPublic-Team6/
 | `src/components/` | 版面、問卷卡片、錯誤邊界；`ui/` 為共用元件庫 |
 | `vite.config.ts` | 開發時將 `/api` **proxy** 至 `http://127.0.0.1:8080` |
 
-### 3.2 `backendV1`
+### 3.2 `backend`
 
 | 區域 | 職責 |
 |------|------|
@@ -117,7 +117,7 @@ SurveyChainPublic-Team6/
 
 後端**不**代使用者簽署鏈上交易；負責業務資料、權限，以及與鏈上對齊的欄位（合約地址、Pool ID、交易雜湊等）。
 
-### 3.3 `contractsV1`
+### 3.3 `contract`
 
 | 區域 | 職責 |
 |------|------|
@@ -209,7 +209,7 @@ flowchart LR
 
 ## 7. 後端 API 路由一覽（`/api`）
 
-註冊於 `backendV1/routes/routes.go`：
+註冊於 `backend/routes/routes.go`：
 
 | 方法 | 路徑 | 認證 |
 |------|------|------|
@@ -231,9 +231,9 @@ flowchart LR
 
 ## 8. 其他說明
 
-- **`frontendV1/client/node_modules`**：npm 依賴，不需手動瀏覽。
-- **`frontendV1/client/dist/`**：前端建置輸出；開發以 `src/` 為主。
-- **合約路徑**：`contractsV1/contracts/contracts/` 為雙層 `contracts` 目錄，與既有專案結構一致。
+- **`frontend/client/node_modules`**：npm 依賴，不需手動瀏覽。
+- **`frontend/client/dist/`**：前端建置輸出；開發以 `src/` 為主。
+- **合約路徑**：`contract/contracts/contracts/` 為雙層 `contracts` 目錄，與既有專案結構一致。
 
 ---
 
