@@ -3,7 +3,7 @@
 ## 專案結構
 
 ```
-go-backend/
+backendV1/
 ├── main.go                  # 程式入口
 ├── go.mod                   # Go 模組定義
 ├── .env.example             # 環境變數範例
@@ -23,7 +23,7 @@ go-backend/
 ### 1. 安裝依賴套件
 
 ```bash
-cd go-backend
+cd backendV1
 go mod tidy
 ```
 
@@ -50,7 +50,7 @@ docker run -d \
 ### 4. 啟動後端
 
 ```bash
-go run main.go
+go run .
 ```
 
 啟動後會自動建立資料表，監聽 `http://localhost:8080`

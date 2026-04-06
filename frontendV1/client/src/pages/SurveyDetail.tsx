@@ -1,6 +1,12 @@
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useRef } from "react";
 import { useParams, useLocation } from "wouter";
-import { surveyApi, participantApi, type Survey, type RevealAnswersResponse } from "@/lib/api";
+import {
+  surveyApi,
+  participantApi,
+  type Survey,
+  type SurveyQuestion,
+  type RevealAnswersResponse,
+} from "@/lib/api";
 import { loginWithWallet } from "@/lib/web3Auth";
 import { useWallet } from "@/contexts/WalletContext";
 import { CONTRACT_ADDRESS, ethToWeiHex, getEtherscanTxUrl } from "@/lib/network";
@@ -29,6 +35,30 @@ import {
   ChevronUp,
 } from "lucide-react";
 import { Link } from "wouter";
+
+/** 與 CreateSurvey Pool B 一致：依 order 第一題、2～10 個選項的選擇題（作為 betB 題目） */
+function getPoolBChainQuestion(survey: Survey): SurveyQuestion | null {
+  const qs = [...(survey.questions ?? [])].sort((a, b) => a.orderIndex - b.orderIndex);
+  for (const q of qs) {
+    if (q.questionType === "text") continue;
+    const n = (q.options ?? []).filter((o) => o.optionText?.trim()).length;
+    if (n >= 2 && n <= 10) return q;
+  }
+  return null;
+}
+
+/** betB 的 _choice：選項依 orderIndex 排序後的 0-based 索引 */
+function choiceIndexForBetB(
+  q: SurveyQuestion,
+  selectedOptionIds: number[] | undefined
+): number | null {
+  if (!selectedOptionIds?.length) return null;
+  const picked = selectedOptionIds[0];
+  const sorted = [...(q.options ?? [])].sort((a, b) => a.orderIndex - b.orderIndex);
+  const idx = sorted.findIndex((o) => o.id === picked);
+  if (idx < 0 || idx > 255) return null;
+  return idx;
+}
 
 function Countdown({ deadline }: { deadline: Date }) {
   const [now, setNow] = useState(new Date());
@@ -105,9 +135,10 @@ export default function SurveyDetail() {
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [isDrawing, setIsDrawing] = useState(false);
   const [isFunding, setIsFunding] = useState(false);
-  const [isPayingEntryFee, setIsPayingEntryFee] = useState(false);
-  const [entryFeeTxHash, setEntryFeeTxHash] = useState<string | null>(null);
+  /** 參與費單位數（每單位 = 建立問卷時設定的 entryFee ETH），預設 1 */
+  const [entryFeeUnits, setEntryFeeUnits] = useState(1);
 
+  const [isPublishing, setIsPublishing] = useState(false);
   const [isRevealingAnswers, setIsRevealingAnswers] = useState(false);
   const [revealResult, setRevealResult] = useState<RevealAnswersResponse | null>(null);
   const [correctAnswers, setCorrectAnswers] = useState<Record<number, number[]>>({});
@@ -116,26 +147,49 @@ export default function SurveyDetail() {
   const [survey, setSurvey] = useState<Survey | null>(null);
   const [isLoading, setIsLoading] = useState(true);
   const [participation, setParticipation] = useState<{ participated: boolean; isWinner: boolean } | null>(null);
+  const participationFetchId = useRef(0);
 
   const fetchSurvey = useCallback(async () => {
-    if (!surveyId) return;
+    if (!surveyId || Number.isNaN(surveyId)) {
+      setSurvey(null);
+      setIsLoading(false);
+      return;
+    }
+    setIsLoading(true);
+    setSurvey(null);
     try {
       const data = await surveyApi.get(surveyId);
       setSurvey(data);
     } catch (err) {
       console.error(err);
+      setSurvey(null);
     } finally {
       setIsLoading(false);
     }
   }, [surveyId]);
 
-  const fetchParticipation = useCallback(async () => {
-    if (!address || !surveyId) return;
+  /** @param preserveWhileRefetching 提交成功後重抓時設 true，避免先清空 state 造成表單短暫重新出現 */
+  const fetchParticipation = useCallback(async (preserveWhileRefetching = false) => {
+    if (!surveyId) return;
+    if (!address) {
+      participationFetchId.current += 1;
+      setParticipation(null);
+      return;
+    }
+    const fetchId = ++participationFetchId.current;
+    if (!preserveWhileRefetching) {
+      setParticipation(null);
+    }
     try {
       const data = await participantApi.checkParticipation(surveyId, address);
-      setParticipation(data);
+      if (fetchId === participationFetchId.current) {
+        setParticipation(data);
+      }
     } catch (err) {
       console.error(err);
+      if (fetchId === participationFetchId.current) {
+        setParticipation(null);
+      }
     }
   }, [surveyId, address]);
 
@@ -144,6 +198,22 @@ export default function SurveyDetail() {
 
   const isDeadlinePassed = survey ? new Date() > new Date(survey.deadline) : false;
   const isCreator = survey && address && survey.creatorAddress.toLowerCase() === address.toLowerCase();
+
+  const handlePublishSurvey = async () => {
+    if (!address || !survey) return;
+    if (!await ensureAuthenticated(address)) return;
+    setIsPublishing(true);
+    try {
+      await surveyApi.updateStatus(surveyId, { status: "active" });
+      toast.success("問卷已發布", { description: "參與者現在可以填寫問卷" });
+      await fetchSurvey();
+    } catch (err: unknown) {
+      const e = err as { message?: string };
+      toast.error("發布失敗", { description: e.message });
+    } finally {
+      setIsPublishing(false);
+    }
+  };
 
   const handleSelectOption = (questionId: number, optionId: number, isMultiple: boolean) => {
     setAnswers((prev) => {
@@ -159,62 +229,12 @@ export default function SurveyDetail() {
     });
   };
 
-  const handlePayEntryFee = async () => {
-    if (!window.ethereum || !address || !survey) return;
-    const fee = parseFloat(survey.entryFee ?? "0");
-    if (fee <= 0) return;
-
-    const onSepolia = await ensureSepoliaNetwork();
-    if (!onSepolia) return;
-
-    const contractAddr = survey.contractAddress || CONTRACT_ADDRESS;
-    if (!contractAddr) {
-      toast.error("合約尚未部署");
-      return;
-    }
-
-    // ★ 確認已登入
-    if (!await ensureAuthenticated(address)) return;
-
-    setIsPayingEntryFee(true);
-    try {
-      const fnSelector = "0x4e71d92d";
-      const surveyIdHex = surveyId.toString(16).padStart(64, "0");
-      const data = `${fnSelector}${surveyIdHex}`;
-
-      const txHash = await window.ethereum.request({
-        method: "eth_sendTransaction",
-        params: [{
-          from: address,
-          to: contractAddr,
-          value: ethToWeiHex(survey.entryFee ?? "0"),
-          data,
-          gas: "0x30000",
-        }],
-      }) as string;
-
-      setEntryFeeTxHash(txHash);
-      toast.success("參與費繳納成功！", {
-        description: "現在可以填寫問卷",
-        action: { label: "查看交易", onClick: () => window.open(getEtherscanTxUrl(txHash), "_blank") },
-      });
-    } catch (err: unknown) {
-      const e = err as { code?: number; message?: string };
-      if (e.code !== 4001) toast.error("繳納失敗", { description: e.message });
-    } finally {
-      setIsPayingEntryFee(false);
-    }
-  };
-
   const handleSubmit = async () => {
     if (!isConnected || !address) { toast.error("請先連接錢包"); return; }
     if (!survey) return;
 
     const fee = parseFloat(survey.entryFee ?? "0");
-    if (fee > 0 && !entryFeeTxHash) {
-      toast.error("請先繳納參與費", { description: `需要繳納 ${survey.entryFee} ETH` });
-      return;
-    }
+    const units = Math.max(1, Math.floor(Number(entryFeeUnits)) || 1);
 
     const answerList = (survey.questions ?? []).map((q) => ({
       questionId: q.id,
@@ -229,24 +249,118 @@ export default function SurveyDetail() {
       if (q.questionType !== "text" && (!ans?.optionIds || ans.optionIds.length === 0)) { toast.error(`請回答第 ${q.orderIndex + 1} 題`); return; }
     }
 
+    if (survey.poolType === "B" && fee > 0) {
+      const chainQ = getPoolBChainQuestion(survey);
+      if (!chainQ) {
+        toast.error("問卷缺少符合 Pool B 的選擇題（2～10 個選項）");
+        return;
+      }
+      const sel = answers[chainQ.id]?.optionIds;
+      if (!sel?.length || sel.length !== 1) {
+        toast.error("Pool B 需在對應選擇題選擇一個選項", { description: "betB 需單一選項" });
+        return;
+      }
+      if (choiceIndexForBetB(chainQ, sel) === null) {
+        toast.error("選項無法對應鏈上索引，請重新選擇");
+        return;
+      }
+    }
+
     // ★ 確認已登入
     if (!await ensureAuthenticated(address)) return;
 
     setIsSubmitting(true);
     try {
+      let entryFeeTransactionHash: string | undefined;
+      let entryFeePaid: string | undefined;
+
+      if (fee > 0) {
+        const onSepolia = await ensureSepoliaNetwork();
+        if (!onSepolia) return;
+
+        const contractAddr = survey.contractAddress || CONTRACT_ADDRESS;
+        if (!contractAddr) {
+          toast.error("合約尚未部署");
+          return;
+        }
+        if (!window.ethereum) {
+          toast.error("需要 MetaMask");
+          return;
+        }
+
+        const { ethers } = await import("ethers");
+        const weiTotal = ethers.parseEther(survey.entryFee!) * BigInt(units);
+        const weiHex = `0x${weiTotal.toString(16)}`;
+
+        let calldata: string;
+        let gasHex: string;
+        let toastMsg: string;
+
+        if (survey.poolType === "B") {
+          if (!survey.contractPoolId) {
+            toast.error("此問卷尚未綁定鏈上 Pool B（contractPoolId）");
+            return;
+          }
+          const chainQ = getPoolBChainQuestion(survey);
+          const choiceIdx = chainQ
+            ? choiceIndexForBetB(chainQ, answers[chainQ.id]?.optionIds)
+            : null;
+          if (!chainQ || choiceIdx === null) {
+            toast.error("無法建立 betB 交易，請確認選擇題答案");
+            return;
+          }
+          const iface = new ethers.Interface([
+            "function betB(uint256 _id, uint8 _choice) payable",
+          ]);
+          calldata = iface.encodeFunctionData("betB", [BigInt(survey.contractPoolId), choiceIdx]);
+          gasHex = "0x4c4b40";
+          toastMsg = "請在錢包確認 betB（參與費）交易…";
+        } else {
+          const fnSelector = "0x4e71d92d";
+          const surveyIdHex = surveyId.toString(16).padStart(64, "0");
+          calldata = `${fnSelector}${surveyIdHex}`;
+          gasHex = "0x30000";
+          toastMsg = "請在錢包確認參與費交易…";
+        }
+
+        toast.info(toastMsg, { duration: 4000 });
+        const txHash = await window.ethereum.request({
+          method: "eth_sendTransaction",
+          params: [
+            {
+              from: address,
+              to: contractAddr,
+              value: weiHex,
+              data: calldata,
+              gas: gasHex,
+            },
+          ],
+        }) as string;
+
+        entryFeeTransactionHash = txHash;
+        entryFeePaid = ethers.formatEther(weiTotal);
+      }
+
       await participantApi.submit({
         surveyId,
         walletAddress: address,
         answers: answerList,
-        entryFeePaid: fee > 0 ? survey.entryFee : undefined,
-        entryFeeTransactionHash: entryFeeTxHash ?? undefined,
+        entryFeePaid: fee > 0 ? entryFeePaid : undefined,
+        entryFeeTransactionHash: fee > 0 ? entryFeeTransactionHash : undefined,
       });
-      toast.success("提交成功！", { description: "您的答案已記錄，祝您中獎！" });
+      toast.success("提交成功！", {
+        description:
+          survey.poolType === "B" && fee > 0 ? "betB 已送出，答案已記錄" : "您的答案已記錄，祝您中獎！",
+      });
       await fetchSurvey();
-      await fetchParticipation();
+      await fetchParticipation(true);
     } catch (err: unknown) {
-      const e = err as { message?: string };
-      toast.error("提交失敗", { description: e.message });
+      const e = err as { code?: number; message?: string };
+      if (e.code === 4001) {
+        toast.error("已取消交易");
+      } else {
+        toast.error("提交失敗", { description: e.message });
+      }
     } finally {
       setIsSubmitting(false);
     }
@@ -493,13 +607,16 @@ export default function SurveyDetail() {
     );
   }
 
-  const statusConfig = {
+  const statusConfig: Record<string, { label: string; className: string }> = {
     draft:  { label: "草稿",   className: "bg-gray-100 text-gray-600" },
     active: { label: "進行中", className: "bg-green-50 text-green-700" },
     ended:  { label: "已結束", className: "bg-orange-50 text-orange-700" },
     drawn:  { label: "已抽獎", className: "bg-purple-50 text-purple-700" },
   };
-  const statusCfg = statusConfig[survey.status];
+  const statusCfg = statusConfig[survey.status] ?? {
+    label: survey.status || "未知",
+    className: "bg-gray-100 text-gray-600",
+  };
 
   // 解析 winnerAddresses（JSON string 或 string[]）
   const winnerList: string[] = (() => {
@@ -581,6 +698,80 @@ export default function SurveyDetail() {
             </CardContent>
           </Card>
         </div>
+
+        {/* 題目預覽：與是否可填寫無關，避免「進行中但已截止」等情況整頁像空白 */}
+        {(survey.questions ?? []).length === 0 && (
+          <Card className="border-dashed border-amber-200 bg-amber-50/50">
+            <CardContent className="pt-4 pb-4 text-sm text-amber-900">
+              此問卷目前沒有題目資料（後端未回傳 <span className="font-mono">questions</span>
+              ）。若你剛建立問卷，請確認建立 API 有寫入題目；或重新整理頁面。
+            </CardContent>
+          </Card>
+        )}
+        {(survey.questions ?? []).length > 0 && (
+          <Card className="border-border">
+            <CardHeader className="pb-2">
+              <CardTitle className="text-base">問卷題目</CardTitle>
+              <p className="text-xs text-muted-foreground font-normal">
+                {survey.status === "active" && !isDeadlinePassed && !participation?.participated
+                  ? "請在下方「填寫問卷」區塊作答並提交"
+                  : survey.status === "active" && !isDeadlinePassed && participation?.participated
+                    ? "您已提交此問卷，題目如下供檢視"
+                    : survey.status === "active" && isDeadlinePassed
+                      ? "此問卷已超過截止時間，僅供檢視題目"
+                      : "題目預覽"}
+              </p>
+            </CardHeader>
+            <CardContent className="space-y-5">
+              {(survey.questions ?? []).map((q, qi) => (
+                <div key={q.id} className="space-y-2">
+                  <div className="flex gap-2">
+                    <span className="text-xs font-bold text-primary bg-primary/10 rounded-full w-6 h-6 flex items-center justify-center shrink-0">
+                      {qi + 1}
+                    </span>
+                    <div>
+                      <p className="text-sm font-medium">{q.questionText}</p>
+                      <p className="text-xs text-muted-foreground mt-0.5">
+                        {q.questionType === "single" ? "單選" : q.questionType === "multiple" ? "多選" : "簡答"}
+                        {q.isRequired && <span className="text-red-500 ml-1">必填</span>}
+                      </p>
+                    </div>
+                  </div>
+                  {q.questionType !== "text" && (q.options ?? []).length > 0 && (
+                    <ul className="ml-8 space-y-1.5 text-sm text-muted-foreground list-disc list-inside">
+                      {(q.options ?? []).map((opt) => (
+                        <li key={opt.id}>{opt.optionText}</li>
+                      ))}
+                    </ul>
+                  )}
+                  {qi < (survey.questions ?? []).length - 1 && <Separator />}
+                </div>
+              ))}
+            </CardContent>
+          </Card>
+        )}
+
+        {/* 草稿：後端建立預設 draft，須發布後才會出現「填寫問卷」 */}
+        {survey.status === "draft" && isCreator && (
+          <Card className="border-amber-300 bg-amber-50">
+            <CardContent className="pt-4 pb-4 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
+              <div>
+                <p className="font-medium text-amber-900">此問卷為草稿，尚未開放填寫</p>
+                <p className="text-xs text-amber-800/90 mt-1">
+                  發布後狀態會變為「進行中」，參與者才能看到題目與選項。
+                </p>
+              </div>
+              <Button
+                size="sm"
+                className="shrink-0 bg-amber-600 hover:bg-amber-700 text-white border-0"
+                disabled={isPublishing || !isConnected}
+                onClick={handlePublishSurvey}
+              >
+                {isPublishing ? "發布中…" : "發布問卷"}
+              </Button>
+            </CardContent>
+          </Card>
+        )}
 
         {/* Countdown */}
         {survey.status === "active" && !isDeadlinePassed && (
@@ -894,41 +1085,46 @@ export default function SurveyDetail() {
                 </div>
               ))}
 
-              {/* 參與費繳納 */}
+              {/* 參與費：單位數（提交時一併送鏈上並寫入後端） */}
               {parseFloat(survey.entryFee ?? "0") > 0 && (
-                <div className={`p-4 rounded-xl border-2 ${
-                  entryFeeTxHash ? "border-green-200 bg-green-50" : "border-amber-200 bg-amber-50"
-                }`}>
+                <div className="p-4 rounded-xl border-2 border-amber-200 bg-amber-50">
                   <div className="flex items-center gap-2 mb-2">
-                    {entryFeeTxHash ? (
-                      <CheckCircle2 className="w-5 h-5 text-green-600" />
-                    ) : (
-                      <AlertCircle className="w-5 h-5 text-amber-600" />
-                    )}
-                    <span className={`font-semibold text-sm ${entryFeeTxHash ? "text-green-800" : "text-amber-800"}`}>
-                      {entryFeeTxHash ? "參與費已繳納" : `需繳納參與費 ${survey.entryFee} ETH`}
+                    <AlertCircle className="w-5 h-5 text-amber-600" />
+                    <span className="font-semibold text-sm text-amber-800">
+                      參與費：每單位 {survey.entryFee} ETH
                     </span>
                   </div>
-                  {entryFeeTxHash ? (
-                    <p className="text-xs text-green-700">
-                      交易：<span className="font-mono">{entryFeeTxHash.slice(0, 20)}...</span>
+                  <p className="text-xs text-amber-700 mb-3">
+                    {survey.poolType === "B"
+                      ? "此參與費將於提交時以合約 betB 送出（金額 = 單位數 × 每單位），並累積至獎金池。"
+                      : "此參與費將於按下「提交問卷並參與抽獎」時一併送出，並累積至獎金池。"}
+                  </p>
+                  <div className="flex flex-wrap items-end gap-3">
+                    <div className="space-y-1">
+                      <label htmlFor="entry-fee-units" className="text-xs text-muted-foreground">
+                        投入單位數（正整數）
+                      </label>
+                      <Input
+                        id="entry-fee-units"
+                        type="number"
+                        min={1}
+                        step={1}
+                        className="w-28 h-9"
+                        value={entryFeeUnits}
+                        onChange={(e) => {
+                          const v = parseInt(e.target.value, 10);
+                          setEntryFeeUnits(Number.isFinite(v) && v >= 1 ? v : 1);
+                        }}
+                      />
+                    </div>
+                    <p className="text-sm text-amber-900 pb-1">
+                      預計送出{" "}
+                      <span className="font-mono font-semibold">
+                        {(parseFloat(survey.entryFee ?? "0") * Math.max(1, entryFeeUnits || 1)).toFixed(6)}
+                      </span>{" "}
+                      ETH
                     </p>
-                  ) : (
-                    <>
-                      <p className="text-xs text-amber-700 mb-3">
-                        此參與費將自動累積到獎金池，提升所有參與者的中獎獎金
-                      </p>
-                      <Button
-                        size="sm"
-                        onClick={handlePayEntryFee}
-                        disabled={isPayingEntryFee || !isConnected}
-                        className="gap-2 bg-amber-600 hover:bg-amber-700 text-white border-0 w-full"
-                      >
-                        <Wallet className="w-4 h-4" />
-                        {isPayingEntryFee ? "處理中..." : `繳納 ${survey.entryFee} ETH 參與費`}
-                      </Button>
-                    </>
-                  )}
+                  </div>
                 </div>
               )}
 
@@ -947,7 +1143,11 @@ export default function SurveyDetail() {
                 disabled={
                   isSubmitting ||
                   !isConnected ||
-                  (parseFloat(survey.entryFee ?? "0") > 0 && !entryFeeTxHash)
+                  (parseFloat(survey.entryFee ?? "0") > 0 &&
+                    !(survey.contractAddress || CONTRACT_ADDRESS)) ||
+                  (parseFloat(survey.entryFee ?? "0") > 0 &&
+                    survey.poolType === "B" &&
+                    !survey.contractPoolId)
                 }
               >
                 {isSubmitting ? "提交中..." : "提交問卷並參與抽獎"}

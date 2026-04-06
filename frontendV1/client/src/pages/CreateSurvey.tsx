@@ -8,6 +8,7 @@ import { Textarea } from "@/components/ui/textarea";
 import { Label } from "@/components/ui/label";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
+import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { toast } from "sonner";
 import { useLocation } from "wouter";
@@ -21,7 +22,40 @@ import {
   ChevronDown,
   ChevronUp,
   AlertCircle,
+  Layers,
 } from "lucide-react";
+
+type ChainPoolMode = "A" | "B";
+
+/** Pool B：合約需要一題 2～10 個選項的單選題（取第一題符合者） */
+function pickPoolBChainQuestion(
+  questions: QuestionInput[]
+): { text: string; optionCount: number } | null {
+  for (const q of questions) {
+    if (!q.questionText.trim()) continue;
+    if (q.questionType !== "single") continue;
+    const n = q.options.filter((o) => o.trim()).length;
+    if (n >= 2 && n <= 10) {
+      return { text: q.questionText.trim(), optionCount: n };
+    }
+  }
+  return null;
+}
+
+/** 切換至 Pool B 時：僅允許單選，簡答／多選改為單選並補上選項列 */
+function normalizeQuestionsForPoolB(prev: QuestionInput[]): QuestionInput[] {
+  return prev.map((q) => {
+    if (q.questionType === "single") return q;
+    if (q.questionType === "multiple") {
+      return { ...q, questionType: "single" };
+    }
+    return {
+      ...q,
+      questionType: "single",
+      options: q.options.length >= 2 ? q.options : ["", ""],
+    };
+  });
+}
 
 type QuestionType = "single" | "multiple" | "text";
 
@@ -51,6 +85,7 @@ export default function CreateSurvey() {
   const [deadlineDate, setDeadlineDate] = useState("");
   const [deadlineTime, setDeadlineTime] = useState("23:59");
   const [questions, setQuestions] = useState<QuestionInput[]>([defaultQuestion()]);
+  const [chainPoolMode, setChainPoolMode] = useState<ChainPoolMode>("A");
   const [isCreating, setIsCreating] = useState(false);
 
   const addQuestion = () => setQuestions((prev) => [...prev, defaultQuestion()]);
@@ -101,7 +136,24 @@ export default function CreateSurvey() {
       return;
     }
     if (!title.trim()) { toast.error("請輸入問卷標題"); return; }
-    if (!rewardAmount || parseFloat(rewardAmount) <= 0) { toast.error("請輸入有效的獎金金額"); return; }
+    if (chainPoolMode === "A") {
+      if (!rewardAmount || parseFloat(rewardAmount) <= 0) {
+        toast.error("Pool A 需輸入有效的初始獎金 (ETH)");
+        return;
+      }
+    }
+    if (chainPoolMode === "B") {
+      for (const q of questions) {
+        if (q.questionType !== "single") {
+          toast.error("Pool B 僅能建立單選題");
+          return;
+        }
+      }
+      if (!pickPoolBChainQuestion(questions)) {
+        toast.error("Pool B 需至少一題單選題，且有效選項為 2～10 個");
+        return;
+      }
+    }
     if (!deadlineDate) { toast.error("請設定截止日期"); return; }
 
     const deadline = new Date(`${deadlineDate}T${deadlineTime}`);
@@ -125,11 +177,16 @@ export default function CreateSurvey() {
       }
 
       // ★ 修正 Step 2：建立問卷（api.ts 會自動帶 JWT header）
+      const rewardForApi =
+        chainPoolMode === "B" && (!rewardAmount?.trim() || parseFloat(rewardAmount) <= 0)
+          ? "0"
+          : rewardAmount;
+
       const data = await surveyApi.create({
         title: title.trim(),
         description: description.trim() || undefined,
         creatorAddress: address,
-        rewardAmount,
+        rewardAmount: rewardForApi,
         rewardToken: "ETH",
         winnerCount,
         deadline: deadline.getTime(),
@@ -140,123 +197,182 @@ export default function CreateSurvey() {
         })),
       });
 
-      // ★ 修正 Step 3：建立成功後，透過 MetaMask 呼叫合約 createPoolA
-      //   並解析 PoolACreated 事件取得鏈上 poolId，存回後端
-      //   目前合約 createPoolA 需要 msg.value > 0，
-      //   若創建者選擇「先建問卷、後存獎金」則跳過此步驟，等到詳情頁再 fundSurvey
-      //   這裡示範自動觸發合約建立的流程（需要合約地址已設定在環境變數）
+      // 後端建立時預設為 draft；詳情頁「填寫問卷」僅在 active 顯示，故建立後立即發布
+      try {
+        await surveyApi.updateStatus(data.surveyId, { status: "active" });
+      } catch {
+        toast.warning("問卷已建立，但自動發布失敗", {
+          description: "請至問卷詳情頁由創建者點「發布問卷」",
+        });
+      }
+
+      // Step 3：依 Pool A / B 透過 MetaMask 呼叫 createPoolA 或 createPoolB（需 VITE_CONTRACT_ADDRESS）
       const contractAddress = import.meta.env.VITE_CONTRACT_ADDRESS as string | undefined;
+      const minutesUntilDeadline = Math.max(
+        1,
+        Math.ceil((deadline.getTime() - Date.now()) / 60000)
+      );
 
-      if (contractAddress && window.ethereum && rewardAmount && parseFloat(rewardAmount) > 0) {
-        try {
-          toast.info("正在呼叫合約建立 Pool...", { duration: 3000 });
+      const pollReceipt = async (txHash: string) => {
+        for (let i = 0; i < 30; i++) {
+          await new Promise((r) => setTimeout(r, 2000));
+          const rec = await window.ethereum!.request({
+            method: "eth_getTransactionReceipt",
+            params: [txHash],
+          }) as { logs: { topics: string[]; data: string }[] } | null;
+          if (rec?.logs) return rec;
+        }
+        return null;
+      };
 
-          // 計算截止時間距離現在的分鐘數
-          const minutesUntilDeadline = Math.ceil(
-            (deadline.getTime() - Date.now()) / 60000
-          );
-
-          // 編碼 createPoolA(string title, uint256 maxWinners, uint256 durationMinutes)
-          // function selector: keccak256("createPoolA(string,uint256,uint256)") 前 4 bytes
-          // 使用動態 ABI 編碼
-          const { ethers } = await import("ethers").catch(() => ({ ethers: null }));
-
-          if (ethers) {
+      if (contractAddress && window.ethereum) {
+        const { ethers } = await import("ethers").catch(() => ({ ethers: null }));
+        if (!ethers) {
+          toast.success("問卷已建立！", {
+            description: `問卷 ID: ${data.surveyId}（無法載入 ethers，已跳過鏈上建立）`,
+          });
+        } else {
+          const runPoolA = async () => {
+            if (!rewardAmount || parseFloat(rewardAmount) <= 0) {
+              toast.success("問卷創建成功！", {
+                description: `問卷 ID: ${data.surveyId}（Pool A 需初始獎金才會呼叫 createPoolA，請至詳情頁處理）`,
+              });
+              return;
+            }
+            toast.info("正在呼叫合約 createPoolA（Pool A）...", { duration: 3000 });
             const iface = new ethers.Interface([
-              "function createPoolA(string _title, uint256 _maxW, uint256 _min) payable"
+              "function createPoolA(string _title, uint256 _maxW, uint256 _min) payable",
             ]);
             const calldata = iface.encodeFunctionData("createPoolA", [
               title.trim(),
               BigInt(winnerCount),
               BigInt(minutesUntilDeadline),
             ]);
-
-            // ETH amount in wei (hex)
             const weiAmount = ethers.parseEther(rewardAmount);
             const weiHex = "0x" + weiAmount.toString(16);
-
-            const txHash = await window.ethereum.request({
+            const txHash = await window.ethereum!.request({
               method: "eth_sendTransaction",
-              params: [{
-                from: address,
-                to: contractAddress,
-                value: weiHex,
-                data: calldata,
-                gas: "0x30000",
-              }],
+              params: [
+                {
+                  from: address,
+                  to: contractAddress,
+                  value: weiHex,
+                  data: calldata,
+                  gas: "0x4c4b40",
+                },
+              ],
             }) as string;
-
-            // ★ 輪詢取得交易回執，解析 PoolACreated 事件中的 poolId
-            toast.info("等待交易確認，解析 Pool ID...", { duration: 5000 });
-
-            let receipt = null;
-            for (let i = 0; i < 30; i++) {
-              await new Promise((r) => setTimeout(r, 2000));
-              receipt = await window.ethereum.request({
-                method: "eth_getTransactionReceipt",
-                params: [txHash],
-              }) as { logs: { topics: string[]; data: string }[] } | null;
-              if (receipt) break;
-            }
-
-            // PoolACreated event topic: keccak256("PoolACreated(uint256,string,uint256,uint256)")
-            const POOL_A_CREATED_TOPIC = "0x" + Array.from(
-              new TextEncoder().encode("PoolACreated(uint256,string,uint256,uint256)")
-            ).reduce((acc, b) => acc + b.toString(16).padStart(2, "0"), "");
-
-            // 用 ethers 計算正確的 topic hash
+            toast.info("等待交易確認（Pool A）...", { duration: 5000 });
+            const receipt = await pollReceipt(txHash);
             const eventTopic = ethers.id("PoolACreated(uint256,string,uint256,uint256)");
             let onChainPoolId: number | null = null;
-
             if (receipt?.logs) {
               for (const log of receipt.logs) {
                 if (log.topics[0]?.toLowerCase() === eventTopic.toLowerCase()) {
-                  // topics[1] 是 indexed uint256 poolId
                   onChainPoolId = parseInt(log.topics[1], 16);
                   break;
                 }
               }
             }
-
-            // ★ 修正 Step 4：將合約地址、Pool ID、Pool Type 存回後端
             if (onChainPoolId !== null) {
               await surveyApi.updateContract(data.surveyId, {
                 contractAddress,
                 transactionHash: txHash,
-                contractPoolId: onChainPoolId,  // 鏈上真實 Pool ID（從 1 開始）
+                contractPoolId: onChainPoolId,
                 poolType: "A",
               });
               toast.success("問卷創建成功！", {
-                description: `問卷 ID: ${data.surveyId}，合約 Pool ID: ${onChainPoolId}`,
+                description: `問卷 ID: ${data.surveyId}，Pool A ID: ${onChainPoolId}`,
               });
             } else {
-              // 無法解析 Pool ID，仍儲存合約地址
               await surveyApi.updateContract(data.surveyId, {
                 contractAddress,
                 transactionHash: txHash,
               });
               toast.success("問卷創建成功！", {
-                description: `問卷 ID: ${data.surveyId}（Pool ID 解析失敗，請手動確認）`,
+                description: `問卷 ID: ${data.surveyId}（Pool A ID 解析失敗，請手動確認）`,
               });
             }
-          } else {
-            // ethers.js 不可用，跳過合約呼叫
-            toast.success("問卷已建立！", {
-              description: `問卷 ID: ${data.surveyId}，請前往詳情頁面存入獎金`,
-            });
-          }
-        } catch (contractErr: unknown) {
-          const e = contractErr as { code?: number; message?: string };
-          if (e.code === 4001) {
-            toast.warning("已跳過合約建立", { description: "問卷資料已儲存，請至詳情頁手動存入獎金" });
-          } else {
-            toast.warning("合約建立失敗，但問卷資料已儲存", { description: e.message });
+          };
+
+          const runPoolB = async () => {
+            const pbq = pickPoolBChainQuestion(questions);
+            if (!pbq) return;
+            toast.info("正在呼叫合約 createPoolB（Pool B）...", { duration: 3000 });
+            const iface = new ethers.Interface([
+              "function createPoolB(string _q, uint8 _optCount, uint256 _maxW, uint256 _min)",
+            ]);
+            const calldata = iface.encodeFunctionData("createPoolB", [
+              pbq.text,
+              pbq.optionCount,
+              BigInt(winnerCount),
+              BigInt(minutesUntilDeadline),
+            ]);
+            const txHash = await window.ethereum!.request({
+              method: "eth_sendTransaction",
+              params: [
+                {
+                  from: address,
+                  to: contractAddress,
+                  value: "0x0",
+                  data: calldata,
+                  gas: "0x4c4b40",
+                },
+              ],
+            }) as string;
+            toast.info("等待交易確認（Pool B）...", { duration: 5000 });
+            const receipt = await pollReceipt(txHash);
+            const eventTopic = ethers.id("PoolBCreated(uint256,string,uint256)");
+            let onChainPoolId: number | null = null;
+            if (receipt?.logs) {
+              for (const log of receipt.logs) {
+                if (log.topics[0]?.toLowerCase() === eventTopic.toLowerCase()) {
+                  onChainPoolId = parseInt(log.topics[1], 16);
+                  break;
+                }
+              }
+            }
+            if (onChainPoolId !== null) {
+              await surveyApi.updateContract(data.surveyId, {
+                contractAddress,
+                transactionHash: txHash,
+                contractPoolId: onChainPoolId,
+                poolType: "B",
+              });
+              toast.success("問卷創建成功！", {
+                description: `問卷 ID: ${data.surveyId}，Pool B ID: ${onChainPoolId}`,
+              });
+            } else {
+              await surveyApi.updateContract(data.surveyId, {
+                contractAddress,
+                transactionHash: txHash,
+              });
+              toast.success("問卷創建成功！", {
+                description: `問卷 ID: ${data.surveyId}（Pool B ID 解析失敗，請手動確認）`,
+              });
+            }
+          };
+
+          try {
+            if (chainPoolMode === "A") {
+              await runPoolA();
+            } else {
+              await runPoolB();
+            }
+          } catch (contractErr: unknown) {
+            const e = contractErr as { code?: number; message?: string };
+            if (e.code === 4001) {
+              toast.warning("已跳過合約建立", {
+                description: "問卷資料已儲存，可稍後於詳情頁再處理鏈上步驟",
+              });
+            } else {
+              toast.warning("合約建立失敗，但問卷資料已儲存", { description: e.message });
+            }
           }
         }
       } else {
-        // 沒有合約地址或未設定獎金，純後端建立
         toast.success("問卷創建成功！", {
-          description: `問卷 ID: ${data.surveyId}，請前往詳情頁面完成獎金存入`,
+          description: `問卷 ID: ${data.surveyId}（未設定合約位址或未連接錢包，僅後端建立）`,
         });
       }
 
@@ -466,6 +582,59 @@ export default function CreateSurvey() {
             </CardContent>
           </Card>
 
+          {/* 鏈上 Pool 模式 */}
+          <Card className="border-violet-200/80 bg-violet-50/40">
+            <CardHeader>
+              <CardTitle className="flex items-center gap-2 text-lg">
+                <Layers className="w-5 h-5 text-violet-600" />
+                鏈上合約 Pool 模式
+              </CardTitle>
+              <p className="text-xs text-muted-foreground font-normal">
+                需設定環境變數 <span className="font-mono">VITE_CONTRACT_ADDRESS</span>；建立成功後會依模式呼叫{" "}
+                <span className="font-mono">createPoolA</span> 或 <span className="font-mono">createPoolB</span>。
+              </p>
+            </CardHeader>
+            <CardContent>
+              <RadioGroup
+                value={chainPoolMode}
+                onValueChange={(v) => {
+                  const mode = v as ChainPoolMode;
+                  setChainPoolMode(mode);
+                  if (mode === "B") {
+                    setQuestions((prev) => normalizeQuestionsForPoolB(prev));
+                  }
+                }}
+                className="grid gap-4"
+              >
+                <div className="flex items-start gap-3 rounded-lg border border-border bg-background p-4">
+                  <RadioGroupItem value="A" id="pool-mode-a" className="mt-1" />
+                  <div className="flex-1 space-y-1">
+                    <Label htmlFor="pool-mode-a" className="text-sm font-semibold cursor-pointer">
+                      Pool A — 投票抽獎
+                    </Label>
+                    <p className="text-xs text-muted-foreground leading-relaxed">
+                      建立時需附帶初始獎金（ETH），合約為 <span className="font-mono">createPoolA</span>。
+                      參與者鏈上登記為 <span className="font-mono">voteA</span>（與本頁問卷表單為不同層，需另行整合）。
+                    </p>
+                  </div>
+                </div>
+                <div className="flex items-start gap-3 rounded-lg border border-border bg-background p-4">
+                  <RadioGroupItem value="B" id="pool-mode-b" className="mt-1" />
+                  <div className="flex-1 space-y-1">
+                    <Label htmlFor="pool-mode-b" className="text-sm font-semibold cursor-pointer">
+                      Pool B — 題目競猜（下注）
+                    </Label>
+                    <p className="text-xs text-muted-foreground leading-relaxed">
+                      建立時<strong>不需</strong>打入獎金；合約為 <span className="font-mono">createPoolB</span>，題目與選項數取自
+                      <strong>第一題</strong>符合條件的<strong>單選題</strong>（2～10 個有效選項；本模式僅能建立單選題）。參與者下注為{" "}
+                      <span className="font-mono">betB</span>。
+                    </p>
+                  </div>
+                </div>
+              </RadioGroup>
+            </CardContent>
+          </Card>
+
           {/* Questions */}
           <Card>
             <CardHeader>
@@ -510,19 +679,25 @@ export default function CreateSurvey() {
 
                   <div>
                     <Label>題目類型</Label>
-                    <Select
-                      value={q.questionType}
-                      onValueChange={(v) => updateQuestion(qi, "questionType", v)}
-                    >
-                      <SelectTrigger className="mt-1.5">
-                        <SelectValue />
-                      </SelectTrigger>
-                      <SelectContent>
-                        <SelectItem value="single">單選題</SelectItem>
-                        <SelectItem value="multiple">多選題</SelectItem>
-                        <SelectItem value="text">簡答題</SelectItem>
-                      </SelectContent>
-                    </Select>
+                    {chainPoolMode === "B" ? (
+                      <p className="mt-1.5 text-sm rounded-md border border-border bg-muted/50 px-3 py-2 text-muted-foreground">
+                        單選題（Pool B 僅支援單選）
+                      </p>
+                    ) : (
+                      <Select
+                        value={q.questionType}
+                        onValueChange={(v) => updateQuestion(qi, "questionType", v)}
+                      >
+                        <SelectTrigger className="mt-1.5">
+                          <SelectValue />
+                        </SelectTrigger>
+                        <SelectContent>
+                          <SelectItem value="single">單選題</SelectItem>
+                          <SelectItem value="multiple">多選題</SelectItem>
+                          <SelectItem value="text">簡答題</SelectItem>
+                        </SelectContent>
+                      </Select>
+                    )}
                   </div>
 
                   {q.questionType !== "text" && (

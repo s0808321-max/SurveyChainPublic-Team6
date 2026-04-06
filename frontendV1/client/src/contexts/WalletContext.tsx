@@ -1,5 +1,6 @@
 import React, { createContext, useCallback, useContext, useEffect, useState } from "react";
 import { toast } from "sonner";
+import { clearAuthToken } from "@/lib/api";
 import { SEPOLIA_CHAIN_ID, SEPOLIA_CHAIN_ID_HEX, SEPOLIA_NETWORK, isSepoliaNetwork } from "@/lib/network";
 
 interface WalletContextType {
@@ -42,11 +43,13 @@ export function WalletProvider({ children }: { children: React.ReactNode }) {
 
   const handleAccountsChanged = useCallback((accounts: unknown) => {
     const accs = accounts as string[];
+    clearAuthToken();
     if (accs.length === 0) {
       setAddress(null);
       setChainId(null);
     } else {
       setAddress(accs[0].toLowerCase());
+      toast.info("已切換錢包帳戶", { description: "請重新進行需簽名登入的操作（建立問卷、提交問卷等）" });
     }
   }, []);
 
@@ -199,7 +202,8 @@ export function WalletProvider({ children }: { children: React.ReactNode }) {
   const disconnect = () => {
     setAddress(null);
     setChainId(null);
-    toast.info("錢包已斷開連接");
+    clearAuthToken();
+    toast.info("錢包已斷開連接", { description: "已清除登入狀態，換帳戶後請重新簽名登入" });
   };
 
   return (

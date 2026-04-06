@@ -51,7 +51,10 @@ export default function SurveyCard({
   entryFee,
 }: SurveyCardProps) {
   const hasEntryFee = entryFee && parseFloat(entryFee) > 0;
-  const cfg = statusConfig[status];
+  const cfg = statusConfig[status] ?? {
+    label: status,
+    className: "bg-gray-100 text-gray-600 border-gray-200",
+  };
   const deadlineDate = new Date(deadline);
   const countdown = formatCountdown(deadlineDate);
 
