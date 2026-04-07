@@ -152,9 +152,19 @@ export const authApi = {
 
 export const surveyApi = {
   /** 取得問卷列表（可選 status 篩選） */
-  list: (status?: string): Promise<SurveyWithCount[]> => {
-    const qs = status ? `?status=${status}` : "";
-    return request<SurveyWithCount[]>(`/surveys${qs}`);
+  list: (
+    status?: string,
+    creator?: string,
+    participant?: string,
+    poolType?: "A" | "B"
+  ): Promise<SurveyWithCount[]> => {
+    const qs = new URLSearchParams();
+    if (status) qs.set("status", status);
+    if (creator) qs.set("creator", creator);
+    if (participant) qs.set("participant", participant);
+    if (poolType) qs.set("poolType", poolType);
+    const suffix = qs.toString() ? `?${qs.toString()}` : "";
+    return request<SurveyWithCount[]>(`/surveys${suffix}`);
   },
 
   /** 取得單一問卷詳情（含題目、選項） */

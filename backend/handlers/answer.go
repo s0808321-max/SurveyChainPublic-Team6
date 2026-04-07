@@ -5,11 +5,60 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"time"
 	"web3survey/db"
 	"web3survey/models"
 
 	"github.com/gin-gonic/gin"
 )
+
+// computeQualifiedSnapshot 依已儲存之正確答案，核對所有參與者並回傳統計（與前端 RevealAnswersResponse 對齊）
+func computeQualifiedSnapshot(surveyID int) (qualifiedAddresses []string, totalParticipants int, gradedQuestionCount int, err error) {
+	var correctAnswers []models.SurveyAnswer
+	if err = db.DB.Where("survey_id = ?", surveyID).Find(&correctAnswers).Error; err != nil {
+		return nil, 0, 0, err
+	}
+	gradedQuestionCount = len(correctAnswers)
+	if len(correctAnswers) == 0 {
+		return []string{}, 0, 0, nil
+	}
+
+	correctMap := make(map[uint]models.SurveyAnswer)
+	for _, a := range correctAnswers {
+		correctMap[a.QuestionID] = a
+	}
+
+	var participants []models.Participant
+	if err = db.DB.Where("survey_id = ?", surveyID).Find(&participants).Error; err != nil {
+		return nil, 0, 0, err
+	}
+	totalParticipants = len(participants)
+
+	qualifiedAddresses = []string{}
+	for _, p := range participants {
+		var submissions []models.Submission
+		db.DB.Where("participant_id = ?", p.ID).Find(&submissions)
+
+		allCorrect := true
+		for _, sub := range submissions {
+			correct, ok := correctMap[sub.QuestionID]
+			if !ok {
+				continue
+			}
+
+			if !isAnswerCorrect(sub, correct) {
+				allCorrect = false
+				break
+			}
+		}
+
+		if allCorrect {
+			qualifiedAddresses = append(qualifiedAddresses, p.WalletAddress)
+		}
+	}
+
+	return qualifiedAddresses, totalParticipants, gradedQuestionCount, nil
+}
 
 // PublishAnswers POST /api/surveys/:id/answers
 // 發題者公布每道題目的正確答案
@@ -67,9 +116,27 @@ func PublishAnswers(c *gin.Context) {
 		}
 	}
 
+	qualified, totalP, graded, err := computeQualifiedSnapshot(surveyID)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "核對參與者答案失敗"})
+		return
+	}
+
+	qaJSON, _ := json.Marshal(qualified)
+	now := time.Now()
+	qaStr := string(qaJSON)
+	_ = db.DB.Model(&survey).Updates(map[string]interface{}{
+		"qualified_addresses": qaStr,
+		"updated_at":          now,
+	}).Error
+
 	c.JSON(http.StatusOK, gin.H{
-		"success": true,
-		"message": "正確答案已公布",
+		"success":             true,
+		"message":             "正確答案已公布",
+		"qualifiedCount":      len(qualified),
+		"totalParticipants":   totalP,
+		"gradedQuestionCount": graded,
+		"qualifiedAddresses":  qualified,
 	})
 }
 
@@ -82,58 +149,19 @@ func GetQualifiedParticipants(c *gin.Context) {
 		return
 	}
 
-	// 取得所有正確答案
-	var correctAnswers []models.SurveyAnswer
-	if err := db.DB.Where("survey_id = ?", surveyID).Find(&correctAnswers).Error; err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "查詢正確答案失敗"})
+	qualifiedAddresses, _, graded, err := computeQualifiedSnapshot(surveyID)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "查詢失敗"})
 		return
 	}
-	if len(correctAnswers) == 0 {
+	if graded == 0 {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "尚未公布正確答案"})
 		return
 	}
 
-	// 建立正確答案的 map（key: questionId）
-	correctMap := make(map[uint]models.SurveyAnswer)
-	for _, a := range correctAnswers {
-		correctMap[a.QuestionID] = a
-	}
-
-	// 取得所有參與者
-	var participants []models.Participant
-	if err := db.DB.Where("survey_id = ?", surveyID).Find(&participants).Error; err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "查詢參與者失敗"})
-		return
-	}
-
-	// 逐一核對每位參與者的答案
-	qualifiedAddresses := []string{}
-
-	for _, p := range participants {
-		var submissions []models.Submission
-		db.DB.Where("participant_id = ?", p.ID).Find(&submissions)
-
-		allCorrect := true
-		for _, sub := range submissions {
-			correct, ok := correctMap[sub.QuestionID]
-			if !ok {
-				continue
-			}
-
-			if !isAnswerCorrect(sub, correct) {
-				allCorrect = false
-				break
-			}
-		}
-
-		if allCorrect {
-			qualifiedAddresses = append(qualifiedAddresses, p.WalletAddress)
-		}
-	}
-
 	c.JSON(http.StatusOK, gin.H{
-		"success":          true,
-		"qualifiedCount":   len(qualifiedAddresses),
+		"success":            true,
+		"qualifiedCount":     len(qualifiedAddresses),
 		"qualifiedAddresses": qualifiedAddresses,
 	})
 }

@@ -513,13 +513,22 @@ export default function SurveyDetail() {
       });
       setRevealResult(result);
       await fetchSurvey();
-      toast.success(
-        `答案公布完成！${result.qualifiedCount} 位完全答對，可進行抽籤`,
-        { description: `共 ${result.totalParticipants} 位參與者，${result.gradedQuestionCount} 道題核對` }
-      );
+      const qCount = result?.qualifiedCount ?? 0;
+      const totalP = result?.totalParticipants ?? 0;
+      const graded = result?.gradedQuestionCount ?? 0;
+      toast.success(`答案公布完成！${qCount} 位完全答對，可進行抽籤`, {
+        description: `共 ${totalP} 位參與者，${graded} 道題核對`,
+      });
     } catch (err: unknown) {
-      const e = err as { message?: string };
-      toast.error("公布答案失敗", { description: e.message });
+      const msg =
+        err instanceof Error
+          ? err.message
+          : typeof err === "string"
+            ? err
+            : (() => {
+                try { return JSON.stringify(err); } catch { return String(err); }
+              })();
+      toast.error("公布答案失敗", { description: msg || "未知錯誤" });
     } finally {
       setIsRevealingAnswers(false);
     }
@@ -877,8 +886,41 @@ export default function SurveyDetail() {
                 </div>
               )}
 
-              {/* 步驟一：公布答案 */}
-              {(survey.status === "active" || survey.status === "ended") && isDeadlinePassed && !revealResult && !survey.qualifiedAddresses && (
+              {/* Pool A：截止後直接觸發 Chainlink VRF 抽獎（不需要公布答案） */}
+              {survey.poolType === "A" &&
+                (survey.status === "active" || survey.status === "ended") &&
+                isDeadlinePassed &&
+                (
+                <div className="space-y-3">
+                  <div className="flex items-center justify-between p-3 bg-white rounded-lg border border-purple-100">
+                    <div>
+                      <p className="text-sm font-medium">觸發 Chainlink VRF 抽獎（Pool A）</p>
+                      <p className="text-xs text-muted-foreground">
+                        從所有已參與者中抽出 {survey.winnerCount} 位中獎者（合約 drawA）
+                      </p>
+                    </div>
+                    <Button
+                      size="sm"
+                      onClick={handleDraw}
+                      disabled={isDrawing}
+                      className="gap-2 bg-purple-600 hover:bg-purple-700 text-white border-0"
+                    >
+                      <Shuffle className="w-4 h-4" />
+                      {isDrawing ? "抽獎中...請稍候" : "Chainlink VRF 抽獎"}
+                    </Button>
+                  </div>
+                  <p className="text-xs text-muted-foreground">
+                    需已綁定合約位址與 <span className="font-mono">contractPoolId</span>；送出後需等待 VRF 回調（約 30–60 秒）。
+                  </p>
+                </div>
+              )}
+
+              {/* 步驟一：公布答案（僅 Pool B 需要；Pool A 為投票抽獎，沒有「正確答案」概念） */}
+              {survey.poolType === "B" &&
+                (survey.status === "active" || survey.status === "ended") &&
+                isDeadlinePassed &&
+                !revealResult &&
+                !survey.qualifiedAddresses && (
                 <div className="space-y-3">
                   <div className="flex items-center justify-between p-3 bg-white rounded-lg border border-blue-100">
                     <div>
@@ -947,8 +989,8 @@ export default function SurveyDetail() {
                 </div>
               )}
 
-              {/* 步驟二：觸發 Chainlink VRF 抽獎 */}
-              {(revealResult || survey.qualifiedAddresses) && survey.status !== "drawn" && (
+              {/* 步驟二：觸發 Chainlink VRF 抽獎（Pool B 需先公布答案 → 取得 qualified；Pool A 不走此區塊） */}
+              {survey.poolType === "B" && (revealResult || survey.qualifiedAddresses) && survey.status !== "drawn" && (
                 <div className="space-y-3">
                   <div className="p-4 bg-green-50 rounded-xl border border-green-200">
                     <div className="flex items-center gap-2 mb-2">
