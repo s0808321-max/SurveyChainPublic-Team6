@@ -47,6 +47,16 @@ func Submit(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "問卷目前不接受作答"})
 		return
 	}
+	// 截止時間到：同步狀態並拒絕作答
+	now := time.Now()
+	if now.After(survey.Deadline) {
+		_ = db.DB.Model(&survey).Updates(map[string]interface{}{
+			"status":     "ended",
+			"updated_at": now,
+		}).Error
+		c.JSON(http.StatusBadRequest, gin.H{"error": "問卷已截止，無法作答"})
+		return
+	}
 
 	// 使用 Transaction 同時寫入參與者與答案
 	var participant models.Participant

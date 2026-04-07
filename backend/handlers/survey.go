@@ -14,20 +14,70 @@ import (
 	"gorm.io/gorm"
 )
 
+// expireActivePastDeadline 將「仍為 active 但已過 deadline」的問卷批次標成 ended（寫入 DB）
+func expireActivePastDeadline(now time.Time) {
+	db.DB.Model(&models.Survey{}).
+		Where("status = ? AND deadline < ?", "active", now).
+		Updates(map[string]interface{}{
+			"status":     "ended",
+			"updated_at": now,
+		})
+}
+
 // GetSurveys GET /api/surveys?status=active
 func GetSurveys(c *gin.Context) {
 	status := c.Query("status")
+	creator := strings.ToLower(strings.TrimSpace(c.Query("creator")))
+	participant := strings.ToLower(strings.TrimSpace(c.Query("participant")))
+	poolType := strings.TrimSpace(c.Query("poolType"))
+
+	now := time.Now()
+	expireActivePastDeadline(now)
 
 	var surveys []models.Survey
 	query := db.DB.Preload("Questions.Options")
 
+	if creator != "" {
+		query = query.Where("creator_address = ?", creator)
+	}
+	if participant != "" {
+		query = query.Where(
+			"id IN (?)",
+			db.DB.Model(&models.Participant{}).
+				Select("survey_id").
+				Where("wallet_address = ?", participant),
+		)
+	}
+	if poolType == "A" || poolType == "B" {
+		query = query.Where("pool_type = ?", poolType)
+	}
+
 	if status != "" {
-		query = query.Where("status = ?", status)
+		if status == "ended" {
+			// 已結束列表：含 status=ended，以及尚未被批次更新到、仍為 active 但已過期的列
+			query = query.Where("(status = ? OR (status = ? AND deadline < ?))", "ended", "active", now)
+		} else if status == "active" {
+			// 進行中：僅未過截止且仍為 active（避免 DB 未及更新時出現「已截止仍顯示進行中」）
+			query = query.Where("status = ? AND deadline >= ?", "active", now)
+		} else {
+			query = query.Where("status = ?", status)
+		}
 	}
 
 	if err := query.Order("created_at DESC").Find(&surveys).Error; err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "查詢問卷失敗"})
 		return
+	}
+
+	// 回傳前再保險：仍為 active 且已過期者補寫 ended，並讓 JSON 的 status 與畫面一致
+	for i := range surveys {
+		if surveys[i].Status == "active" && now.After(surveys[i].Deadline) {
+			_ = db.DB.Model(&surveys[i]).Updates(map[string]interface{}{
+				"status":     "ended",
+				"updated_at": now,
+			}).Error
+			surveys[i].Status = "ended"
+		}
 	}
 
 	result := make([]models.SurveyWithCount, len(surveys))
@@ -55,6 +105,17 @@ func GetSurvey(c *gin.Context) {
 	if err := db.DB.Preload("Questions.Options").First(&survey, id).Error; err != nil {
 		c.JSON(http.StatusNotFound, gin.H{"error": "問卷不存在"})
 		return
+	}
+
+	// 單筆查詢也做一次狀態同步（active 且已截止 → ended）
+	now := time.Now()
+	if survey.Status == "active" && now.After(survey.Deadline) {
+		if err := db.DB.Model(&survey).Updates(map[string]interface{}{
+			"status":     "ended",
+			"updated_at": now,
+		}).Error; err == nil {
+			survey.Status = "ended"
+		}
 	}
 
 	var count int64

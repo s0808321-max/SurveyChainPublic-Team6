@@ -51,11 +51,15 @@ export default function SurveyCard({
   entryFee,
 }: SurveyCardProps) {
   const hasEntryFee = entryFee && parseFloat(entryFee) > 0;
-  const cfg = statusConfig[status] ?? {
-    label: status,
+  const deadlineDate = new Date(deadline);
+  const deadlinePassed = deadlineDate.getTime() <= Date.now();
+  // 後端可能尚未把 status 從 active 改成 ended；小卡與列表應與「截止時間」一致
+  const displayStatus =
+    status === "active" && deadlinePassed ? "ended" : status;
+  const cfg = statusConfig[displayStatus] ?? {
+    label: displayStatus,
     className: "bg-gray-100 text-gray-600 border-gray-200",
   };
-  const deadlineDate = new Date(deadline);
   const countdown = formatCountdown(deadlineDate);
 
   return (
@@ -106,8 +110,14 @@ export default function SurveyCard({
           </div>
           <div className="flex items-center gap-2 text-sm text-muted-foreground">
             <Clock className="w-4 h-4 shrink-0" />
-            <span className={status === "active" && countdown !== "已截止" ? "text-orange-600 font-medium" : ""}>
-              {status === "active" ? countdown : deadlineDate.toLocaleDateString("zh-TW")}
+            <span
+              className={
+                displayStatus === "active" && countdown !== "已截止"
+                  ? "text-orange-600 font-medium"
+                  : ""
+              }
+            >
+              {displayStatus === "active" ? countdown : deadlineDate.toLocaleDateString("zh-TW")}
             </span>
           </div>
         </div>
