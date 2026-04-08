@@ -9,7 +9,6 @@ frontend/**/.env
 # --- Dependencies (reinstall with npm/pnpm/yarn) ---
 node_modules/
 frontend/**/node_modules/
-frontend/**/package-lock.json
 
 # --- Frontend build & Vite cache ---
 dist/
