@@ -15,6 +15,7 @@ contract SurveyChainSystem is VRFConsumerBaseV2Plus {
         address[] participants;
         mapping(address => bool) hasVoted;
         bool isDrawn;
+        bool exists;
     }
 
     struct PoolB {
@@ -32,6 +33,8 @@ contract SurveyChainSystem is VRFConsumerBaseV2Plus {
         uint8 correctAnswer;
         bool isResolved;
         bool isDrawn;
+        bool refundMode;
+        bool exists;
     }
 
     // 中獎紀錄結構，供反查使用
@@ -47,17 +50,23 @@ contract SurveyChainSystem is VRFConsumerBaseV2Plus {
         uint256 maxWinners;
     }
 
-    // ★ 新增：Pool A 基本資訊（供前端查詢，略過含 mapping 的欄位）
+    struct VRFRequest {
+        uint8 poolType;
+        uint256 poolId;
+        bool exists;
+    }
+
+    // Pool A 基本資訊（供前端查詢，略過含 mapping 的欄位）
     struct PoolAInfo {
         string title;
         uint256 prizePool;
         uint256 maxWinners;
         uint256 deadline;
-        uint256 participantCount;
+        uint256 participantCount;   // Pool A 參與人數
         bool isDrawn;
     }
 
-    // ★ 新增：Pool B 基本資訊（供前端查詢）
+    // Pool B 基本資訊（供前端查詢）
     struct PoolBInfo {
         string question;
         uint8 optionCount;
@@ -65,18 +74,19 @@ contract SurveyChainSystem is VRFConsumerBaseV2Plus {
         uint256 deadline;
         uint256 prizePool;
         address creator;
-        uint256 playerCount;
-        uint256 correctPlayerCount;
+        uint256 playerCount;        // Pool B 下注人數
+        uint256 correctPlayerCount; // Pool B 答對人數
         uint8 correctAnswer;
         bool isResolved;
         bool isDrawn;
+        bool refundMode;
     }
 
     // --- 狀態變數 ---
     mapping(uint256 => PoolA) public poolsA;
     mapping(uint256 => PoolB) public poolsB;
 
-    // ★ 修正：從 1 開始計數，避免 id=0 與「未設定」混淆，與後端 DB autoIncrement 一致
+    // 從 1 開始計數，避免 id=0 與「未設定」混淆，與後端 DB autoIncrement 一致
     uint256 public countA = 1;
     uint256 public countB = 1;
 
@@ -93,13 +103,17 @@ contract SurveyChainSystem is VRFConsumerBaseV2Plus {
     uint256 public lockedPrize;
 
     // VRF 請求追蹤
-    mapping(uint256 => uint8)   private requestToType;
-    mapping(uint256 => uint256) private requestToId;
-    mapping(uint256 => bool)    private requestExists;
+    mapping(uint256 => VRFRequest) private vrfRequests;
+
+    // Pool B 退款金額紀錄（無人答對 或 creator timeout 時使用）
+    mapping(uint256 => mapping(address => uint256)) public poolBRefundAmount;
 
     // Chainlink 設定 (Sepolia 測試網)
     uint256 public s_subscriptionId;
     bytes32 public keyHash = 0x787d74caea10b2b357790d5b5247c2f63d1d91572a9846f780606e4d953677ae;
+
+    // creator 逾期未解答的 timeout 天數
+    uint256 public constant RESOLVE_TIMEOUT = 60 days;
 
     // --- 事件 ---
     event PoolACreated(uint256 indexed id, string title, uint256 prizePool, uint256 deadline);
@@ -107,7 +121,8 @@ contract SurveyChainSystem is VRFConsumerBaseV2Plus {
     event DrawRequested(uint8 indexed poolType, uint256 indexed poolId, uint256 requestId);
     event WinnersSelected(uint8 indexed poolType, uint256 indexed poolId, uint256 winnerCount, uint256 prizePerWinner);
     event Claimed(uint8 indexed poolType, uint256 indexed poolId, address indexed winner, uint256 amount);
-    event NoWinnersRefunded(uint256 indexed poolBId, address creator, uint256 amount);
+    event PoolBRefundEnabled(uint256 indexed poolBId, uint256 totalRefund, bool isTimeout);
+    event PoolBRefundClaimed(uint256 indexed poolBId, address indexed player, uint256 amount);
     event OwnerWithdrawn(address indexed owner, uint256 amount);
 
     constructor(uint256 _subId) VRFConsumerBaseV2Plus(0x9DdfaCa8183c41ad55329BdeeD9F6A8d53168B1B) {
@@ -121,7 +136,6 @@ contract SurveyChainSystem is VRFConsumerBaseV2Plus {
         require(_maxW > 0, "maxWinners must > 0");
         require(_min > 0, "Duration must > 0");
 
-        // ★ 修正：先取 id 再遞增（從 1 開始），原本 countA++ 會讓第一個 Pool id=0
         uint256 id = countA;
         countA++;
 
@@ -130,14 +144,14 @@ contract SurveyChainSystem is VRFConsumerBaseV2Plus {
         p.prizePool = msg.value;
         p.maxWinners = _maxW;
         p.deadline = block.timestamp + (_min * 1 minutes);
+        p.exists = true;
 
         emit PoolACreated(id, _title, msg.value, p.deadline);
     }
 
     function voteA(uint256 _id) public {
         PoolA storage p = poolsA[_id];
-        // ★ 新增：確認 Pool 存在
-        require(p.deadline > 0, "Pool does not exist");
+        require(p.exists, "Pool does not exist");
         require(block.timestamp < p.deadline, "Ended");
         require(!p.hasVoted[msg.sender], "Already voted");
 
@@ -147,8 +161,7 @@ contract SurveyChainSystem is VRFConsumerBaseV2Plus {
 
     function drawA(uint256 _id) public {
         PoolA storage p = poolsA[_id];
-        // ★ 新增：確認 Pool 存在
-        require(p.deadline > 0, "Pool does not exist");
+        require(p.exists, "Pool does not exist");
         require(block.timestamp >= p.deadline, "Not expired");
         require(!p.isDrawn, "Already drawn");
         require(p.participants.length > 0, "No participants");
@@ -163,7 +176,6 @@ contract SurveyChainSystem is VRFConsumerBaseV2Plus {
         require(_maxW > 0, "maxWinners must > 0");
         require(_min > 0, "Duration must > 0");
 
-        // ★ 修正：先取 id 再遞增（從 1 開始）
         uint256 id = countB;
         countB++;
 
@@ -173,14 +185,14 @@ contract SurveyChainSystem is VRFConsumerBaseV2Plus {
         p.maxWinners = _maxW;
         p.deadline = block.timestamp + (_min * 1 minutes);
         p.creator = msg.sender;
+        p.exists = true;
 
         emit PoolBCreated(id, _q, p.deadline);
     }
 
     function betB(uint256 _id, uint8 _choice) public payable {
         PoolB storage p = poolsB[_id];
-        // ★ 新增：確認 Pool 存在
-        require(p.deadline > 0, "Pool does not exist");
+        require(p.exists, "Pool does not exist");
         require(msg.sender != p.creator, "Creator cannot bet");
         require(block.timestamp < p.deadline, "Closed");
         require(_choice < p.optionCount, "Invalid option");
@@ -196,8 +208,7 @@ contract SurveyChainSystem is VRFConsumerBaseV2Plus {
 
     function resolveAndDrawB(uint256 _id, uint8 _answer) public {
         PoolB storage p = poolsB[_id];
-        // ★ 新增：確認 Pool 存在
-        require(p.deadline > 0, "Pool does not exist");
+        require(p.exists, "Pool does not exist");
         require(msg.sender == p.creator, "Only creator");
         require(block.timestamp >= p.deadline, "Not expired");
         require(!p.isResolved, "Already resolved");
@@ -214,16 +225,60 @@ contract SurveyChainSystem is VRFConsumerBaseV2Plus {
         }
 
         if (p.correctPlayers.length == 0) {
-            p.isDrawn = true;
-            uint256 refund = p.prizePool;
-            p.prizePool = 0;
-            (bool success, ) = payable(p.creator).call{value: refund}("");
-            require(success, "Refund failed");
-            emit NoWinnersRefunded(_id, p.creator, refund);
+            // 呼叫共用內部函式啟用退款模式
+            _enableRefundMode(_id, p, false);
             return;
         }
 
         _sendVRFRequest(1, _id);
+    }
+
+    // creator 超過 60 天未解答時，任何人可觸發退款給各玩家
+    function triggerTimeoutRefundB(uint256 _id) public {
+        PoolB storage p = poolsB[_id];
+        require(p.exists, "Pool does not exist");
+        require(!p.isResolved, "Already resolved");
+        require(block.timestamp >= p.deadline + RESOLVE_TIMEOUT, "Timeout not reached");
+        require(p.players.length > 0, "No players to refund");
+
+        p.isResolved = true;
+
+        // 呼叫共用內部函式啟用退款模式
+        _enableRefundMode(_id, p, true);
+    }
+
+    // [整合D] 共用內部函式：啟用退款模式，將各玩家下注金額寫入退款紀錄
+    function _enableRefundMode(uint256 _id, PoolB storage p, bool isTimeout) internal {
+        p.isDrawn = true;
+        p.refundMode = true;
+        p.prizePool = 0;
+
+        uint256 totalRefund = 0;
+        for (uint256 i = 0; i < p.players.length; i++) {
+            address player = p.players[i];
+            uint256 refund = p.betAmount[player];
+            poolBRefundAmount[_id][player] = refund;
+            lockedPrize += refund;
+            totalRefund += refund;
+        }
+
+        // 統一事件，以 isTimeout 區分觸發原因
+        emit PoolBRefundEnabled(_id, totalRefund, isTimeout);
+    }
+
+    // 玩家在退款模式下領回自己的下注金額
+    function claimPoolBRefund(uint256 _id) public {
+        require(poolsB[_id].refundMode, "Not in refund mode");
+        uint256 refund = poolBRefundAmount[_id][msg.sender];
+        require(refund > 0, "Nothing to refund");
+
+        poolBRefundAmount[_id][msg.sender] = 0;
+        lockedPrize -= refund;
+
+        (bool success, ) = payable(msg.sender).call{value: refund}("");
+        require(success, "Refund failed");
+
+        emit PoolBRefundClaimed(_id, msg.sender, refund);
     }
 
     // ================== VRF 核心邏輯 ==================
@@ -234,36 +289,43 @@ contract SurveyChainSystem is VRFConsumerBaseV2Plus {
                 keyHash: keyHash,
                 subId: s_subscriptionId,
                 requestConfirmations: 3,
-                // ★ 修正：從 100,000 調高至 400,000，防止大量中獎人時 gas 耗盡
-                callbackGasLimit: 400000,
+                callbackGasLimit: 250000,
                 numWords: 1,
                 extraArgs: VRFV2PlusClient._argsToBytes(VRFV2PlusClient.ExtraArgsV1({nativePayment: false}))
             })
         );
 
-        requestToType[requestId] = _type;
-        requestToId[requestId]   = _id;
-        requestExists[requestId] = true;
+        vrfRequests[requestId] = VRFRequest({ poolType: _type, poolId: _id, exists: true });
 
         emit DrawRequested(_type, _id, requestId);
     }
 
+    // 輔助函式：取出 Pool 資訊並標記 isDrawn
     function _getPoolInfo(uint8 _pType, uint256 _pId) private returns (PoolInfo memory info) {
         if (_pType == 0) {
             PoolA storage pA = poolsA[_pId];
             pA.isDrawn      = true;
-            info.candidates = pA.participants;
             info.totalPrize = pA.prizePool;
             info.maxWinners = pA.maxWinners;
+            uint256 len = pA.participants.length;
+            info.candidates = new address[](len);
+            for (uint256 i = 0; i < len; i++) {
+                info.candidates[i] = pA.participants[i];
+            }
         } else {
             PoolB storage pB = poolsB[_pId];
             pB.isDrawn      = true;
-            info.candidates = pB.correctPlayers;
             info.totalPrize = pB.prizePool;
             info.maxWinners = pB.maxWinners;
+            uint256 len = pB.correctPlayers.length;
+            info.candidates = new address[](len);
+            for (uint256 i = 0; i < len; i++) {
+                info.candidates[i] = pB.correctPlayers[i];
+            }
         }
     }
 
+    // 輔助函式：Fisher-Yates Shuffle 抽籤並寫入中獎紀錄
     function _drawWinners(
         uint8   _pType,
         uint256 _pId,
@@ -280,21 +342,20 @@ contract SurveyChainSystem is VRFConsumerBaseV2Plus {
             isWinner[_pType][_pId][winnerAddress] = true;
             userWins[winnerAddress].push(WinRecord({ poolType: _pType, poolId: _pId }));
 
+            // Fisher-Yates 去重交換（在 memory 副本上操作，不影響 storage 原始陣列）
             _candidates[winnerIndex] = _candidates[remaining - 1];
         }
     }
 
     function fulfillRandomWords(uint256 _requestId, uint256[] calldata _randomWords) internal override {
-        require(requestExists[_requestId], "Unknown request");
+        VRFRequest memory req = vrfRequests[_requestId];
+        require(req.exists, "Unknown request");
 
-        uint8   pType = requestToType[_requestId];
-        uint256 pId   = requestToId[_requestId];
+        // 提前清除請求紀錄，節省 Gas 並防止重入
+        delete vrfRequests[_requestId];
 
-        delete requestToType[_requestId];
-        delete requestToId[_requestId];
-        delete requestExists[_requestId];
-
-        PoolInfo memory info = _getPoolInfo(pType, pId);
+        // 取出 Pool 資訊（同時標記 isDrawn）
+        PoolInfo memory info = _getPoolInfo(req.poolType, req.poolId);
 
         if (info.candidates.length == 0) return;
 
@@ -302,14 +363,16 @@ contract SurveyChainSystem is VRFConsumerBaseV2Plus {
             ? info.candidates.length
             : info.maxWinners;
 
-        prizePerWinner[pType][pId] = info.totalPrize / actualWinnersCount;
-        remainderPrize[pType][pId] = info.totalPrize % actualWinnersCount;
+        // 計算每人獎金與餘數
+        prizePerWinner[req.poolType][req.poolId] = info.totalPrize / actualWinnersCount;
+        remainderPrize[req.poolType][req.poolId] = info.totalPrize % actualWinnersCount;
 
-        _drawWinners(pType, pId, info.candidates, actualWinnersCount, _randomWords[0]);
+        // Fisher-Yates Shuffle 抽籤
+        _drawWinners(req.poolType, req.poolId, info.candidates, actualWinnersCount, _randomWords[0]);
 
         lockedPrize += info.totalPrize;
 
-        emit WinnersSelected(pType, pId, actualWinnersCount, prizePerWinner[pType][pId]);
+        emit WinnersSelected(req.poolType, req.poolId, actualWinnersCount, prizePerWinner[req.poolType][req.poolId]);
     }
 
     // ================== 自領模式 (Claim) ==================
@@ -322,6 +385,7 @@ contract SurveyChainSystem is VRFConsumerBaseV2Plus {
 
         uint256 amount = prizePerWinner[_type][_id];
 
+        // 餘數由第一個 claim 的人領走，領完即清零
         uint256 bonus = remainderPrize[_type][_id];
         if (bonus > 0) {
             remainderPrize[_type][_id] = 0;
@@ -358,13 +422,19 @@ contract SurveyChainSystem is VRFConsumerBaseV2Plus {
 
             lockedPrize -= amount;
             total += amount;
-
-            emit Claimed(pType, pId, msg.sender, amount);
         }
 
         require(total > 0, "Nothing to claim");
+
         (bool success, ) = payable(msg.sender).call{value: total}("");
         require(success, "Transfer failed");
+
+        for (uint256 i = 0; i < records.length; i++) {
+            uint8   pType = records[i].poolType;
+            uint256 pId   = records[i].poolId;
+            if (!hasClaimed[pType][pId][msg.sender]) continue;
+            emit Claimed(pType, pId, msg.sender, prizePerWinner[pType][pId]);
+        }
     }
 
     // ================== owner 提領 ==================
@@ -379,10 +449,9 @@ contract SurveyChainSystem is VRFConsumerBaseV2Plus {
 
     // ================== 查詢輔助 ==================
 
-    // ★ 新增：回傳 Pool A 完整基本資訊（繞過 mapping 無法自動產生 getter 的問題）
     function getPoolAInfo(uint256 _id) external view returns (PoolAInfo memory) {
         PoolA storage p = poolsA[_id];
-        require(p.deadline > 0, "Pool does not exist");
+        require(p.exists, "Pool does not exist");
         return PoolAInfo({
             title:            p.title,
             prizePool:        p.prizePool,
@@ -393,10 +462,9 @@ contract SurveyChainSystem is VRFConsumerBaseV2Plus {
         });
     }
 
-    // ★ 新增：回傳 Pool B 完整基本資訊
     function getPoolBInfo(uint256 _id) external view returns (PoolBInfo memory) {
         PoolB storage p = poolsB[_id];
-        require(p.deadline > 0, "Pool does not exist");
+        require(p.exists, "Pool does not exist");
         return PoolBInfo({
             question:           p.question,
             optionCount:        p.optionCount,
@@ -408,23 +476,9 @@ contract SurveyChainSystem is VRFConsumerBaseV2Plus {
             correctPlayerCount: p.correctPlayers.length,
             correctAnswer:      p.correctAnswer,
             isResolved:         p.isResolved,
-            isDrawn:            p.isDrawn
+            isDrawn:            p.isDrawn,
+            refundMode:         p.refundMode
         });
-    }
-
-    // Pool A 參與人數
-    function getPoolAParticipantCount(uint256 _id) external view returns (uint256) {
-        return poolsA[_id].participants.length;
-    }
-
-    // Pool B 下注人數
-    function getPoolBPlayerCount(uint256 _id) external view returns (uint256) {
-        return poolsB[_id].players.length;
-    }
-
-    // Pool B 答對人數
-    function getPoolBCorrectPlayerCount(uint256 _id) external view returns (uint256) {
-        return poolsB[_id].correctPlayers.length;
     }
 
     // 查詢呼叫者所有尚未領取的獎金總額
@@ -435,16 +489,22 @@ contract SurveyChainSystem is VRFConsumerBaseV2Plus {
             uint256 pId   = records[i].poolId;
             if (hasClaimed[pType][pId][msg.sender]) continue;
             total += prizePerWinner[pType][pId];
+            // 注意：remainderPrize 為先到先得，此處不計入以免高估
         }
     }
 
-    // ★ 新增：查詢特定地址是否已參與 Pool A（前端可用）
+    // 查詢特定地址是否已參與 Pool A（前端可用）
     function hasVotedA(uint256 _id, address _user) external view returns (bool) {
         return poolsA[_id].hasVoted[_user];
     }
 
-    // ★ 新增：查詢特定地址是否已下注 Pool B（前端可用）
+    // 查詢特定地址是否已下注 Pool B（前端可用）
     function hasBetB(uint256 _id, address _user) external view returns (bool) {
         return poolsB[_id].hasBet[_user];
+    }
+
+    // 查詢玩家在特定 Pool B 的可退款金額
+    function getPoolBRefundAmount(uint256 _id) external view returns (uint256) {
+        return poolBRefundAmount[_id][msg.sender];
     }
 }

@@ -10,15 +10,15 @@
 |------|-----|
 | **網路** | Sepolia（chainId `11155111`） |
 | **部署方式** | Remix IDE |
-| **合約地址** | `0x729F4777D3519B6b51E5cee611F6EBAE7A67ce6b` |
-| **Etherscan** | [Sepolia 合約頁](https://sepolia.etherscan.io/address/0x729F4777D3519B6b51E5cee611F6EBAE7A67ce6b) |
+| **合約地址** | `0x4a40a9273F312a2D5C5c1Fa056C6B5b603336F2A` |
+| **Etherscan** | [Sepolia 合約頁](https://sepolia.etherscan.io/address/0x4a40a9273F312a2D5C5c1Fa056C6B5b603336F2A) |
 
 ## 前端連線
 
 在 `frontend/client` 建立 `.env` 或 `.env.local`（可參考同目錄 `.env.example`）：
 
 ```env
-VITE_CONTRACT_ADDRESS=0x729F4777D3519B6b51E5cee611F6EBAE7A67ce6b
+VITE_CONTRACT_ADDRESS=0x4a40a9273F312a2D5C5c1Fa056C6B5b603336F2A
 ```
 
 修改後需重啟 `npm run dev`。
