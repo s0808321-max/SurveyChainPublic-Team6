@@ -4,7 +4,11 @@
  * 前端透過 Vite proxy 將 /api/* 轉發到 Go 後端（port 8080）
  */
 
-const BASE = "/api";
+// ★ 修正：正式部署時讀取 VITE_API_URL 環境變數作為後端基底網址
+// 本機開發沒有設定時，使用相對路徑 /api（由 vite proxy 轉發到 localhost:8080）
+const BASE = (import.meta.env.VITE_API_URL
+  ? import.meta.env.VITE_API_URL.replace(/\/$/, "") + "/api"
+  : "/api");
 
 // ─── JWT Token 管理 ──────────────────────────────────────────────────────────
 
