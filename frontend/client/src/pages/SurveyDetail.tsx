@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, useRef } from "react";
+import { useState, useEffect, useCallback, useMemo, useRef } from "react";
 import { useParams, useLocation } from "wouter";
 import {
   surveyApi,
@@ -6,6 +6,7 @@ import {
   type Survey,
   type SurveyQuestion,
   type RevealAnswersResponse,
+  type ParticipantSubmission,
 } from "@/lib/api";
 import { loginWithWallet } from "@/lib/web3Auth";
 import { useWallet } from "@/contexts/WalletContext";
@@ -113,6 +114,30 @@ async function parseWinnersFromReceipt(txHash: string): Promise<string[]> {
   return [];
 }
 
+async function waitForTxSuccess(
+  txHash: string,
+  opts?: { maxTries?: number; intervalMs?: number }
+): Promise<void> {
+  if (!window.ethereum) throw new Error("需要 MetaMask");
+  const maxTries = opts?.maxTries ?? 90;
+  const intervalMs = opts?.intervalMs ?? 2000;
+
+  for (let i = 0; i < maxTries; i++) {
+    await new Promise((r) => setTimeout(r, intervalMs));
+    const receipt = await window.ethereum.request({
+      method: "eth_getTransactionReceipt",
+      params: [txHash],
+    }) as { status?: string } | null;
+
+    if (!receipt) continue;
+    const status = (receipt.status ?? "").toLowerCase();
+    if (status === "0x1") return;
+    if (status === "0x0") throw new Error("鏈上交易失敗（reverted）");
+    return;
+  }
+  throw new Error("等待鏈上交易確認逾時，請稍後到錢包或區塊瀏覽器確認交易狀態");
+}
+
 // ★ 確保已登入（有 JWT），若未登入則觸發 MetaMask 簽名流程
 async function ensureAuthenticated(address: string): Promise<boolean> {
   const { getAuthToken } = await import("@/lib/api");
@@ -147,6 +172,9 @@ export default function SurveyDetail() {
   const [survey, setSurvey] = useState<Survey | null>(null);
   const [isLoading, setIsLoading] = useState(true);
   const [participation, setParticipation] = useState<{ participated: boolean; isWinner: boolean } | null>(null);
+  const [publicSubmissions, setPublicSubmissions] = useState<ParticipantSubmission[] | null>(null);
+  const [isLoadingPublicSubmissions, setIsLoadingPublicSubmissions] = useState(false);
+  const [publicSubmissionsError, setPublicSubmissionsError] = useState<string | null>(null);
   const participationFetchId = useRef(0);
 
   const fetchSurvey = useCallback(async () => {
@@ -198,6 +226,38 @@ export default function SurveyDetail() {
 
   const isDeadlinePassed = survey ? new Date() > new Date(survey.deadline) : false;
   const isCreator = survey && address && survey.creatorAddress.toLowerCase() === address.toLowerCase();
+
+  const questionById = useMemo(() => {
+    const map = new Map<number, SurveyQuestion>();
+    for (const q of (survey?.questions ?? [])) map.set(q.id, q);
+    return map;
+  }, [survey]);
+
+  const optionTextById = useMemo(() => {
+    const map = new Map<number, string>();
+    for (const q of (survey?.questions ?? [])) {
+      for (const opt of (q.options ?? [])) map.set(opt.id, opt.optionText);
+    }
+    return map;
+  }, [survey]);
+
+  useEffect(() => {
+    // Pool A 截止後，公開呈現所有作答
+    if (!survey) return;
+    if (survey.poolType !== "A") return;
+    if (!isDeadlinePassed) return;
+
+    setIsLoadingPublicSubmissions(true);
+    setPublicSubmissionsError(null);
+    participantApi.listSubmissions(surveyId)
+      .then((rows) => setPublicSubmissions(rows))
+      .catch((e: unknown) => {
+        const msg = (e as { message?: string })?.message || "載入作答失敗";
+        setPublicSubmissions(null);
+        setPublicSubmissionsError(msg);
+      })
+      .finally(() => setIsLoadingPublicSubmissions(false));
+  }, [survey, isDeadlinePassed, surveyId]);
 
   const handlePublishSurvey = async () => {
     if (!address || !survey) return;
@@ -316,11 +376,16 @@ export default function SurveyDetail() {
           gasHex = "0x4c4b40";
           toastMsg = "請在錢包確認 betB（參與費）交易…";
         } else {
-          const fnSelector = "0x4e71d92d";
-          const surveyIdHex = surveyId.toString(16).padStart(64, "0");
-          calldata = `${fnSelector}${surveyIdHex}`;
+          if (!survey.contractPoolId) {
+            toast.error("此問卷尚未綁定鏈上 Pool A（contractPoolId）");
+            return;
+          }
+          const iface = new ethers.Interface([
+            "function voteA(uint256 _id)",
+          ]);
+          calldata = iface.encodeFunctionData("voteA", [BigInt(survey.contractPoolId)]);
           gasHex = "0x30000";
-          toastMsg = "請在錢包確認參與費交易…";
+          toastMsg = "請在錢包確認 voteA（參與費）交易…";
         }
 
         toast.info(toastMsg, { duration: 4000 });
@@ -336,6 +401,9 @@ export default function SurveyDetail() {
             },
           ],
         }) as string;
+
+        // ★ 關鍵：等交易確認成功再寫入後端，避免 reverted 仍提交答案
+        await waitForTxSuccess(txHash);
 
         entryFeeTransactionHash = txHash;
         entryFeePaid = ethers.formatEther(weiTotal);
@@ -1051,6 +1119,75 @@ export default function SurveyDetail() {
                   </p>
                 </div>
               </div>
+            </CardContent>
+          </Card>
+        )}
+
+        {/* Pool A 公開作答（截止後） */}
+        {survey.poolType === "A" && isDeadlinePassed && isCreator && (
+          <Card>
+            <CardHeader>
+              <CardTitle className="text-lg">Pool A 作答公開</CardTitle>
+              <p className="text-sm text-muted-foreground">
+                問卷截止後，顯示所有參與者作答（資料來源：後端資料庫）。
+              </p>
+            </CardHeader>
+            <CardContent className="space-y-4">
+              {isLoadingPublicSubmissions && (
+                <div className="text-sm text-muted-foreground">載入作答中…</div>
+              )}
+
+              {!isLoadingPublicSubmissions && publicSubmissionsError && (
+                <div className="text-sm text-muted-foreground">
+                  目前無法載入作答清單：{publicSubmissionsError}
+                  <div className="mt-1 text-xs">
+                    若你尚未新增後端 `GET /api/surveys/:id/submissions`，會出現 404。
+                  </div>
+                </div>
+              )}
+
+              {!isLoadingPublicSubmissions && !publicSubmissionsError && (publicSubmissions?.length ?? 0) === 0 && (
+                <div className="text-sm text-muted-foreground">目前尚無作答。</div>
+              )}
+
+              {!isLoadingPublicSubmissions && !publicSubmissionsError && (publicSubmissions?.length ?? 0) > 0 && (
+                <div className="space-y-3">
+                  {publicSubmissions!.map((row: ParticipantSubmission) => (
+                    <div key={`${row.participantId}`} className="rounded-xl border p-4 bg-white space-y-3">
+                      <div className="flex items-center justify-between gap-3">
+                        <div className="text-sm font-medium break-all">{row.walletAddress}</div>
+                        <div className="text-xs text-muted-foreground shrink-0">
+                          {new Date(row.submittedAt).toLocaleString()}
+                        </div>
+                      </div>
+
+                      <div className="space-y-3">
+                        {row.answers.map((a: ParticipantSubmission["answers"][number]) => {
+                          const q = questionById.get(a.questionId);
+                          const label = q ? q.questionText : `Question #${a.questionId}`;
+
+                          let value = "-";
+                          if (q?.questionType === "text") {
+                            value = (a.answerText ?? "").trim() || "-";
+                          } else if (a.selectedOptionIds?.length) {
+                            const texts = a.selectedOptionIds
+                              .map((id) => optionTextById.get(id) ?? `Option #${id}`)
+                              .filter(Boolean);
+                            value = texts.join("、") || "-";
+                          }
+
+                          return (
+                            <div key={`${row.participantId}-${a.questionId}`} className="space-y-1">
+                              <div className="text-xs font-medium text-slate-700">{label}</div>
+                              <div className="text-sm text-slate-900 whitespace-pre-wrap break-words">{value}</div>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
             </CardContent>
           </Card>
         )}

@@ -152,3 +152,108 @@ func ListParticipants(c *gin.Context) {
 
 	c.JSON(http.StatusOK, participants)
 }
+
+// ListSubmissions GET /api/surveys/:id/submissions
+// Pool A 截止後公開顯示所有參與者作答（資料來源：DB submissions）
+func ListSubmissions(c *gin.Context) {
+	surveyID, err := strconv.Atoi(c.Param("id"))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "無效的問卷 ID"})
+		return
+	}
+
+	// 1) 確認問卷存在、且為 Pool A、且已截止
+	var survey models.Survey
+	if err := db.DB.First(&survey, surveyID).Error; err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "問卷不存在"})
+		return
+	}
+	// 只有發問者可查看所有作答（JWT middleware 會寫入 wallet）
+	rawWallet, _ := c.Get("wallet")
+	wallet, _ := rawWallet.(string)
+	wallet = strings.ToLower(strings.TrimSpace(wallet))
+	if wallet == "" {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "未登入"})
+		return
+	}
+	if strings.ToLower(survey.CreatorAddress) != wallet {
+		c.JSON(http.StatusForbidden, gin.H{"error": "只有發問者可以查看所有作答"})
+		return
+	}
+	if survey.PoolType == nil || *survey.PoolType != "A" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "僅支援 Pool A 問卷公開作答"})
+		return
+	}
+	now := time.Now()
+	if now.Before(survey.Deadline) {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "問卷尚未截止，無法公開作答"})
+		return
+	}
+
+	// 2) 取得參與者（維持穩定順序）
+	var participants []models.Participant
+	if err := db.DB.Where("survey_id = ?", surveyID).
+		Order("submitted_at ASC").
+		Find(&participants).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "查詢參與者失敗"})
+		return
+	}
+
+	type respAnswer struct {
+		QuestionID        uint   `json:"questionId"`
+		AnswerText        string `json:"answerText,omitempty"`
+		SelectedOptionIDs []int  `json:"selectedOptionIds,omitempty"`
+	}
+	type respRow struct {
+		ParticipantID uint         `json:"participantId"`
+		WalletAddress string       `json:"walletAddress"`
+		SubmittedAt   time.Time    `json:"submittedAt"`
+		Answers       []respAnswer `json:"answers"`
+	}
+
+	if len(participants) == 0 {
+		c.JSON(http.StatusOK, []respRow{})
+		return
+	}
+
+	// 3) 一次抓出所有 submissions，再依 participant 分組
+	ids := make([]uint, 0, len(participants))
+	for _, p := range participants {
+		ids = append(ids, p.ID)
+	}
+
+	var subs []models.Submission
+	if err := db.DB.Where("participant_id IN ?", ids).
+		Order("participant_id ASC, question_id ASC").
+		Find(&subs).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "查詢作答失敗"})
+		return
+	}
+
+	byParticipant := make(map[uint][]respAnswer, len(participants))
+	for _, s := range subs {
+		a := respAnswer{
+			QuestionID: s.QuestionID,
+			AnswerText: s.AnswerText,
+		}
+		if strings.TrimSpace(s.SelectedOptionIDs) != "" {
+			var optIDs []int
+			if err := json.Unmarshal([]byte(s.SelectedOptionIDs), &optIDs); err == nil && len(optIDs) > 0 {
+				a.SelectedOptionIDs = optIDs
+			}
+		}
+		byParticipant[s.ParticipantID] = append(byParticipant[s.ParticipantID], a)
+	}
+
+	out := make([]respRow, 0, len(participants))
+	for _, p := range participants {
+		out = append(out, respRow{
+			ParticipantID: p.ID,
+			WalletAddress: p.WalletAddress,
+			SubmittedAt:   p.SubmittedAt,
+			Answers:       byParticipant[p.ID],
+		})
+	}
+
+	c.JSON(http.StatusOK, out)
+}
