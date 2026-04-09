@@ -1,0 +1,30 @@
+# --- Secrets & local env ---
+.env
+.env.local
+.env.*.local
+backend/.env
+frontend/**/.env
+*.pem
+
+# --- Dependencies (reinstall with npm/pnpm/yarn) ---
+node_modules/
+frontend/**/node_modules/
+
+# --- Frontend build & Vite cache ---
+dist/
+**/dist/
+**/.vite/
+
+# --- Go ---
+backend/tmp/
+*.exe
+coverage/
+
+# --- OS & IDE ---
+.DS_Store
+.idea/
+.vscode/
+
+# --- Logs ---
+*.log
+npm-debug.log*
