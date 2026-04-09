@@ -133,6 +133,19 @@ export interface Participant {
   submittedAt: string;
 }
 
+export interface ParticipantSubmissionAnswer {
+  questionId: number;
+  answerText?: string;
+  selectedOptionIds?: number[];
+}
+
+export interface ParticipantSubmission {
+  participantId: number;
+  walletAddress: string;
+  submittedAt: string;
+  answers: ParticipantSubmissionAnswer[];
+}
+
 // ─── 認證 API ─────────────────────────────────────────────────────────────────
 
 export const authApi = {
@@ -305,4 +318,11 @@ export const participantApi = {
   /** 取得問卷所有參與者（公開路由） */
   list: (surveyId: number): Promise<Participant[]> =>
     request(`/surveys/${surveyId}/participants`),
+
+  /**
+   * 取得問卷所有參與者的作答（預期用於 Pool A 截止後公開顯示）
+   * 後端尚未提供時會回 404，前端可顯示提示訊息。
+   */
+  listSubmissions: (surveyId: number): Promise<ParticipantSubmission[]> =>
+    request(`/surveys/${surveyId}/submissions`, undefined, true),
 };

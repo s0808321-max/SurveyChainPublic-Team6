@@ -29,6 +29,7 @@
 			surveys.GET("/:id/qualified", handlers.GetQualifiedParticipants) // ★ 新增
 
 			// 需要登入的路由
+			surveys.GET("/:id/submissions", middleware.AuthRequired(), handlers.ListSubmissions)
 			surveys.POST("", middleware.AuthRequired(), handlers.CreateSurvey)
 			surveys.PATCH("/:id/status", middleware.AuthRequired(), handlers.UpdateStatus)
 			surveys.PATCH("/:id/contract", middleware.AuthRequired(), handlers.UpdateContract)

@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, useRef } from "react";
+import { useState, useEffect, useCallback, useMemo, useRef } from "react";
 import { useParams, useLocation } from "wouter";
 import {
   surveyApi,
@@ -6,6 +6,7 @@ import {
   type Survey,
   type SurveyQuestion,
   type RevealAnswersResponse,
+  type ParticipantSubmission,
 } from "@/lib/api";
 import { loginWithWallet } from "@/lib/web3Auth";
 import { useWallet } from "@/contexts/WalletContext";
@@ -171,6 +172,9 @@ export default function SurveyDetail() {
   const [survey, setSurvey] = useState<Survey | null>(null);
   const [isLoading, setIsLoading] = useState(true);
   const [participation, setParticipation] = useState<{ participated: boolean; isWinner: boolean } | null>(null);
+  const [publicSubmissions, setPublicSubmissions] = useState<ParticipantSubmission[] | null>(null);
+  const [isLoadingPublicSubmissions, setIsLoadingPublicSubmissions] = useState(false);
+  const [publicSubmissionsError, setPublicSubmissionsError] = useState<string | null>(null);
   const participationFetchId = useRef(0);
 
   const fetchSurvey = useCallback(async () => {
@@ -222,6 +226,38 @@ export default function SurveyDetail() {
 
   const isDeadlinePassed = survey ? new Date() > new Date(survey.deadline) : false;
   const isCreator = survey && address && survey.creatorAddress.toLowerCase() === address.toLowerCase();
+
+  const questionById = useMemo(() => {
+    const map = new Map<number, SurveyQuestion>();
+    for (const q of (survey?.questions ?? [])) map.set(q.id, q);
+    return map;
+  }, [survey]);
+
+  const optionTextById = useMemo(() => {
+    const map = new Map<number, string>();
+    for (const q of (survey?.questions ?? [])) {
+      for (const opt of (q.options ?? [])) map.set(opt.id, opt.optionText);
+    }
+    return map;
+  }, [survey]);
+
+  useEffect(() => {
+    // Pool A 截止後，公開呈現所有作答
+    if (!survey) return;
+    if (survey.poolType !== "A") return;
+    if (!isDeadlinePassed) return;
+
+    setIsLoadingPublicSubmissions(true);
+    setPublicSubmissionsError(null);
+    participantApi.listSubmissions(surveyId)
+      .then((rows) => setPublicSubmissions(rows))
+      .catch((e: unknown) => {
+        const msg = (e as { message?: string })?.message || "載入作答失敗";
+        setPublicSubmissions(null);
+        setPublicSubmissionsError(msg);
+      })
+      .finally(() => setIsLoadingPublicSubmissions(false));
+  }, [survey, isDeadlinePassed, surveyId]);
 
   const handlePublishSurvey = async () => {
     if (!address || !survey) return;
@@ -1083,6 +1119,75 @@ export default function SurveyDetail() {
                   </p>
                 </div>
               </div>
+            </CardContent>
+          </Card>
+        )}
+
+        {/* Pool A 公開作答（截止後） */}
+        {survey.poolType === "A" && isDeadlinePassed && isCreator && (
+          <Card>
+            <CardHeader>
+              <CardTitle className="text-lg">Pool A 作答公開</CardTitle>
+              <p className="text-sm text-muted-foreground">
+                問卷截止後，顯示所有參與者作答（資料來源：後端資料庫）。
+              </p>
+            </CardHeader>
+            <CardContent className="space-y-4">
+              {isLoadingPublicSubmissions && (
+                <div className="text-sm text-muted-foreground">載入作答中…</div>
+              )}
+
+              {!isLoadingPublicSubmissions && publicSubmissionsError && (
+                <div className="text-sm text-muted-foreground">
+                  目前無法載入作答清單：{publicSubmissionsError}
+                  <div className="mt-1 text-xs">
+                    若你尚未新增後端 `GET /api/surveys/:id/submissions`，會出現 404。
+                  </div>
+                </div>
+              )}
+
+              {!isLoadingPublicSubmissions && !publicSubmissionsError && (publicSubmissions?.length ?? 0) === 0 && (
+                <div className="text-sm text-muted-foreground">目前尚無作答。</div>
+              )}
+
+              {!isLoadingPublicSubmissions && !publicSubmissionsError && (publicSubmissions?.length ?? 0) > 0 && (
+                <div className="space-y-3">
+                  {publicSubmissions!.map((row: ParticipantSubmission) => (
+                    <div key={`${row.participantId}`} className="rounded-xl border p-4 bg-white space-y-3">
+                      <div className="flex items-center justify-between gap-3">
+                        <div className="text-sm font-medium break-all">{row.walletAddress}</div>
+                        <div className="text-xs text-muted-foreground shrink-0">
+                          {new Date(row.submittedAt).toLocaleString()}
+                        </div>
+                      </div>
+
+                      <div className="space-y-3">
+                        {row.answers.map((a: ParticipantSubmission["answers"][number]) => {
+                          const q = questionById.get(a.questionId);
+                          const label = q ? q.questionText : `Question #${a.questionId}`;
+
+                          let value = "-";
+                          if (q?.questionType === "text") {
+                            value = (a.answerText ?? "").trim() || "-";
+                          } else if (a.selectedOptionIds?.length) {
+                            const texts = a.selectedOptionIds
+                              .map((id) => optionTextById.get(id) ?? `Option #${id}`)
+                              .filter(Boolean);
+                            value = texts.join("、") || "-";
+                          }
+
+                          return (
+                            <div key={`${row.participantId}-${a.questionId}`} className="space-y-1">
+                              <div className="text-xs font-medium text-slate-700">{label}</div>
+                              <div className="text-sm text-slate-900 whitespace-pre-wrap break-words">{value}</div>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
             </CardContent>
           </Card>
         )}
