@@ -274,3 +274,24 @@ export const SURVEY_LOTTERY_ABI = [
 ] as const;
 
 export type SurveyStatus = 0 | 1 | 2; // 0: Active, 1: Drawn, 2: Cancelled
+
+/**
+ * SurveyChainSystem（Pool A/B + claim）— Navbar 待領獎金用。
+ * getPendingPrize / claimAll 依 msg.sender，讀取時須用 signer 呼叫 eth_call。
+ */
+export const SURVEY_CHAIN_SYSTEM_CLAIM_FRAGMENT = [
+  {
+    name: "getPendingPrize",
+    type: "function",
+    stateMutability: "view",
+    inputs: [],
+    outputs: [{ name: "total", type: "uint256" }],
+  },
+  {
+    name: "claimAll",
+    type: "function",
+    stateMutability: "nonpayable",
+    inputs: [],
+    outputs: [],
+  },
+] as const;

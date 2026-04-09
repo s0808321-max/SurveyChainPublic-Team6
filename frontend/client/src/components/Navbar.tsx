@@ -8,7 +8,7 @@ import {
 import { Link, useLocation } from "wouter";
 import { useEffect, useState, useCallback } from "react";
 import { ethers } from "ethers";
-import { SURVEY_LOTTERY_ABI } from "@/lib/contractABI";
+import { SURVEY_CHAIN_SYSTEM_CLAIM_FRAGMENT } from "@/lib/contractABI";
 import { toast } from "sonner";
 
 // 合約地址（從環境變數或常數取得）
@@ -24,28 +24,20 @@ export default function Navbar() {
   // 待提領獎金狀態
   const [pendingAmount, setPendingAmount] = useState<bigint>(BigInt(0));
   const [isClaiming, setIsClaiming] = useState(false);
-  const [wonSurveyIds, setWonSurveyIds] = useState<number[]>([]);
 
-  // 查詢待提領金額
+  // 查詢待提領金額（SurveyChainSystem：getPendingPrize 依 msg.sender，需 signer）
   const fetchPendingRewards = useCallback(async () => {
-    if (!address || !isConnected || !isCorrectNetwork || !CONTRACT_ADDRESS) return;
+    if (!address || !isConnected || !isCorrectNetwork || !CONTRACT_ADDRESS || !window.ethereum) return;
 
     try {
-      // 1. 從後端取得中獎的問卷 ID 列表
-      const res = await fetch(`/api/users/${address}/won-surveys`);
-      const data = await res.json();
-      const ids: number[] = data.surveyIds || [];
-      setWonSurveyIds(ids);
-
-      if (ids.length === 0) {
-        setPendingAmount(BigInt(0));
-        return;
-      }
-
-      // 2. 呼叫合約查詢總待提領金額
-      const provider = new ethers.BrowserProvider(window.ethereum!);
-      const contract = new ethers.Contract(CONTRACT_ADDRESS, SURVEY_LOTTERY_ABI, provider);
-      const total: bigint = await contract.getTotalPendingReward(address, ids);
+      const provider = new ethers.BrowserProvider(window.ethereum);
+      const signer = await provider.getSigner();
+      const contract = new ethers.Contract(
+        CONTRACT_ADDRESS,
+        SURVEY_CHAIN_SYSTEM_CLAIM_FRAGMENT,
+        signer
+      );
+      const total: bigint = await contract.getPendingPrize();
       setPendingAmount(total);
     } catch (err) {
       console.error("查詢待提領金額失敗", err);
@@ -60,39 +52,25 @@ export default function Navbar() {
     return () => clearInterval(interval);
   }, [fetchPendingRewards]);
 
-  // 提領獎金（使用批量提領函數 claimMultiplePrizes）
+  // 提領獎金（SurveyChainSystem.claimAll：一次領完 msg.sender 所有未領池）
   const handleClaim = async () => {
-    if (!address || wonSurveyIds.length === 0 || pendingAmount === BigInt(0)) return;
+    if (!address || pendingAmount === BigInt(0) || !window.ethereum) return;
 
     setIsClaiming(true);
     try {
-      const provider = new ethers.BrowserProvider(window.ethereum!);
+      const provider = new ethers.BrowserProvider(window.ethereum);
       const signer = await provider.getSigner();
-      const contract = new ethers.Contract(CONTRACT_ADDRESS, SURVEY_LOTTERY_ABI, signer);
+      const contract = new ethers.Contract(
+        CONTRACT_ADDRESS,
+        SURVEY_CHAIN_SYSTEM_CLAIM_FRAGMENT,
+        signer
+      );
 
-      // 找出有待提領金額的問卷 ID
-      const idsWithReward: number[] = [];
-      for (const surveyId of wonSurveyIds) {
-        const amount: bigint = await contract.getPendingReward(surveyId, address);
-        if (amount > BigInt(0)) {
-          idsWithReward.push(surveyId);
-        }
-      }
-
-      if (idsWithReward.length === 0) {
-        toast.info("目前沒有可提領的獎金");
-        return;
-      }
-
-      // 使用批量提領（單一交易，節省 Gas）
-      const tx = await contract.claimMultiplePrizes(idsWithReward);
+      const tx = await contract.claimAll();
       await tx.wait();
-      
-      toast.success("獎金提領成功！", {
-        description: `已提領 ${idsWithReward.length} 個問卷的獎金`,
-      });
 
-      // 提領完成後刷新金額
+      toast.success("獎金提領成功！");
+
       await fetchPendingRewards();
     } catch (err: unknown) {
       const error = err as { code?: number; message?: string };
