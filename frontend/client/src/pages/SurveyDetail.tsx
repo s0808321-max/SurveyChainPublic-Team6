@@ -113,6 +113,30 @@ async function parseWinnersFromReceipt(txHash: string): Promise<string[]> {
   return [];
 }
 
+async function waitForTxSuccess(
+  txHash: string,
+  opts?: { maxTries?: number; intervalMs?: number }
+): Promise<void> {
+  if (!window.ethereum) throw new Error("需要 MetaMask");
+  const maxTries = opts?.maxTries ?? 90;
+  const intervalMs = opts?.intervalMs ?? 2000;
+
+  for (let i = 0; i < maxTries; i++) {
+    await new Promise((r) => setTimeout(r, intervalMs));
+    const receipt = await window.ethereum.request({
+      method: "eth_getTransactionReceipt",
+      params: [txHash],
+    }) as { status?: string } | null;
+
+    if (!receipt) continue;
+    const status = (receipt.status ?? "").toLowerCase();
+    if (status === "0x1") return;
+    if (status === "0x0") throw new Error("鏈上交易失敗（reverted）");
+    return;
+  }
+  throw new Error("等待鏈上交易確認逾時，請稍後到錢包或區塊瀏覽器確認交易狀態");
+}
+
 // ★ 確保已登入（有 JWT），若未登入則觸發 MetaMask 簽名流程
 async function ensureAuthenticated(address: string): Promise<boolean> {
   const { getAuthToken } = await import("@/lib/api");
@@ -316,11 +340,16 @@ export default function SurveyDetail() {
           gasHex = "0x4c4b40";
           toastMsg = "請在錢包確認 betB（參與費）交易…";
         } else {
-          const fnSelector = "0x4e71d92d";
-          const surveyIdHex = surveyId.toString(16).padStart(64, "0");
-          calldata = `${fnSelector}${surveyIdHex}`;
+          if (!survey.contractPoolId) {
+            toast.error("此問卷尚未綁定鏈上 Pool A（contractPoolId）");
+            return;
+          }
+          const iface = new ethers.Interface([
+            "function voteA(uint256 _id)",
+          ]);
+          calldata = iface.encodeFunctionData("voteA", [BigInt(survey.contractPoolId)]);
           gasHex = "0x30000";
-          toastMsg = "請在錢包確認參與費交易…";
+          toastMsg = "請在錢包確認 voteA（參與費）交易…";
         }
 
         toast.info(toastMsg, { duration: 4000 });
@@ -336,6 +365,9 @@ export default function SurveyDetail() {
             },
           ],
         }) as string;
+
+        // ★ 關鍵：等交易確認成功再寫入後端，避免 reverted 仍提交答案
+        await waitForTxSuccess(txHash);
 
         entryFeeTransactionHash = txHash;
         entryFeePaid = ethers.formatEther(weiTotal);
