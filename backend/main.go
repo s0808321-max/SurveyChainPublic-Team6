@@ -2,7 +2,9 @@ package main
 
 import (
 	"log"
+	"net/http"
 	"os"
+	"strings"
 	"web3survey/db"
 	"web3survey/routes"
 
@@ -17,25 +19,29 @@ func main() {
 		log.Println("未找到 .env 檔案，使用系統環境變數")
 	}
 
-	// ★ 修正：正式環境若未設定 JWT_SECRET 則警告，防止使用預設值導致安全漏洞
 	if os.Getenv("JWT_SECRET") == "" {
-		log.Println("[警告] JWT_SECRET 未設定，目前使用開發預設值。正式環境請務必在 .env 設定此變數！")
+		log.Println("[警告] JWT_SECRET 未設定，目前使用開發預設值。正式環境請務必設定此變數！")
 	}
 
 	// 初始化資料庫
 	db.Init()
 
+	// 讀取 PORT（Railway 會自動注入）
+	port := os.Getenv("PORT")
+	if port == "" {
+		port = "8080"
+	}
+
 	// 建立 Gin 路由
 	r := gin.Default()
 	r.SetTrustedProxies(nil)
 
-	// ★ 修正：從環境變數讀取允許的前端 Origin，支援正式部署
+	// CORS 設定（允許所有 origin，因為前端由同一服務 serve，主要供本地開發用）
 	allowOrigins := []string{"http://localhost:5173", "http://localhost:3000"}
 	if frontendURL := os.Getenv("FRONTEND_URL"); frontendURL != "" {
 		allowOrigins = append(allowOrigins, frontendURL)
 	}
 
-	// CORS 設定
 	r.Use(cors.New(cors.Config{
 		AllowOrigins:     allowOrigins,
 		AllowMethods:     []string{"GET", "POST", "PATCH", "DELETE", "OPTIONS"},
@@ -51,8 +57,23 @@ func main() {
 	// 註冊所有 API 路由（前綴 /api）
 	routes.Register(r)
 
-	log.Println("Go 後端啟動，監聽 port 8080...")
-	if err := r.Run(":8080"); err != nil {
+	// ★ Serve 前端靜態檔案（/dist 目錄由 Dockerfile 建置時複製進來）
+	r.Static("/assets", "./dist/assets")
+	r.StaticFile("/favicon.ico", "./dist/favicon.ico")
+
+	// ★ 所有非 /api 路由都回傳 index.html（SPA fallback）
+	r.NoRoute(func(c *gin.Context) {
+		path := c.Request.URL.Path
+		// /api/* 路由找不到時回傳 404 JSON，其餘回傳 index.html
+		if strings.HasPrefix(path, "/api/") {
+			c.JSON(http.StatusNotFound, gin.H{"error": "路由不存在"})
+			return
+		}
+		c.File("./dist/index.html")
+	})
+
+	log.Printf("Go 後端啟動，監聽 port %s...", port)
+	if err := r.Run(":" + port); err != nil {
 		log.Fatalf("啟動失敗: %v", err)
 	}
 }

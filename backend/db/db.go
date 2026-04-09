@@ -1,7 +1,6 @@
 package db
 
 import (
-	"fmt"
 	"log"
 	"os"
 	"web3survey/models"
@@ -33,7 +32,7 @@ func Init() {
 		&models.Option{},
 		&models.Participant{},
 		&models.Submission{},
-		&models.SurveyAnswer{}, // ★ 修正：補上 SurveyAnswer，否則 PublishAnswers 會失敗
+		&models.SurveyAnswer{},
 	)
 	if err != nil {
 		log.Fatalf("AutoMigrate 失敗: %v", err)
@@ -42,8 +41,14 @@ func Init() {
 	log.Println("資料庫連線成功，資料表已同步")
 }
 
-// buildDSN 從環境變數組合 PostgreSQL 連線字串
+// buildDSN 優先使用 DATABASE_URL（Railway PostgreSQL 提供），否則從各別環境變數組合
 func buildDSN() string {
+	// ★ Railway 提供的完整連線字串，直接使用
+	if url := os.Getenv("DATABASE_URL"); url != "" {
+		log.Println("使用 DATABASE_URL 連線資料庫")
+		return url
+	}
+
 	host := getEnv("DB_HOST", "localhost")
 	port := getEnv("DB_PORT", "5432")
 	user := getEnv("DB_USER", "postgres")
@@ -51,10 +56,10 @@ func buildDSN() string {
 	dbname := getEnv("DB_NAME", "web3survey")
 	sslmode := getEnv("DB_SSLMODE", "disable")
 
-	return fmt.Sprintf(
-		"host=%s port=%s user=%s password=%s dbname=%s sslmode=%s TimeZone=Asia/Taipei",
-		host, port, user, password, dbname, sslmode,
-	)
+	log.Printf("使用分散環境變數連線資料庫：%s@%s:%s/%s", user, host, port, dbname)
+	return "host=" + host + " port=" + port + " user=" + user +
+		" password=" + password + " dbname=" + dbname +
+		" sslmode=" + sslmode + " TimeZone=Asia/Taipei"
 }
 
 func getEnv(key, fallback string) string {
