@@ -1,0 +1,9 @@
+[build]
+builder = "nixpacks"
+buildCommand = "cd frontend/client && npm install && npm run build && cd ../../backend && go build -o server ."
+
+[deploy]
+startCommand = "/app/backend/server"
+healthcheckPath = "/health"
+healthcheckTimeout = 60
+restartPolicyType = "on_failure"

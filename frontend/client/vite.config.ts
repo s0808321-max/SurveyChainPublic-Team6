@@ -16,6 +16,7 @@ export default defineConfig({
   },
   server: {
     port: 5173,
+    // 本機開發時仍然 proxy 到本機後端
     proxy: {
       "/api": {
         target: "http://127.0.0.1:8080",

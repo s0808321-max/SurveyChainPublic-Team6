@@ -2,7 +2,9 @@ package main
 
 import (
 	"log"
+	"net/http"
 	"os"
+	"strings"
 	"web3survey/db"
 	"web3survey/routes"
 
@@ -12,30 +14,29 @@ import (
 )
 
 func main() {
-	// 載入 .env 檔案（找不到也不中斷，適合正式環境）
 	if err := godotenv.Load(); err != nil {
 		log.Println("未找到 .env 檔案，使用系統環境變數")
 	}
 
-	// ★ 修正：正式環境若未設定 JWT_SECRET 則警告，防止使用預設值導致安全漏洞
 	if os.Getenv("JWT_SECRET") == "" {
-		log.Println("[警告] JWT_SECRET 未設定，目前使用開發預設值。正式環境請務必在 .env 設定此變數！")
+		log.Println("[警告] JWT_SECRET 未設定，目前使用開發預設值")
 	}
 
-	// 初始化資料庫
 	db.Init()
 
-	// 建立 Gin 路由
 	r := gin.Default()
 	r.SetTrustedProxies(nil)
 
-	// ★ 修正：從環境變數讀取允許的前端 Origin，支援正式部署
-	allowOrigins := []string{"http://localhost:5173", "http://localhost:3000"}
+	// 前後端同一 domain，CORS 只需允許 localhost 開發環境
+	allowOrigins := []string{
+		"http://localhost:5173",
+		"http://localhost:3000",
+	}
 	if frontendURL := os.Getenv("FRONTEND_URL"); frontendURL != "" {
-		allowOrigins = append(allowOrigins, frontendURL)
+		cleaned := strings.Trim(frontendURL, `"'`)
+		allowOrigins = append(allowOrigins, cleaned)
 	}
 
-	// CORS 設定
 	r.Use(cors.New(cors.Config{
 		AllowOrigins:     allowOrigins,
 		AllowMethods:     []string{"GET", "POST", "PATCH", "DELETE", "OPTIONS"},
@@ -48,11 +49,41 @@ func main() {
 		c.JSON(200, gin.H{"status": "ok"})
 	})
 
-	// 註冊所有 API 路由（前綴 /api）
+	// API 路由
 	routes.Register(r)
 
-	log.Println("Go 後端啟動，監聽 port 8080...")
-	if err := r.Run(":8080"); err != nil {
+	// ★ 核心：服務前端靜態檔案
+	// 前端 build 完的檔案在 ../frontend/client/dist
+	// Railway build 時會先 build 前端，所以這個路徑會存在
+	// Railway 會把整個 repo 放在 /app 執行
+	// build 完前端的 dist 在 /app/frontend/client/dist
+	staticPath := os.Getenv("STATIC_PATH")
+	if staticPath == "" {
+		staticPath = "/app/frontend/client/dist"
+	}
+
+	// 服務靜態資源（JS、CSS、圖片等）
+	r.Static("/assets", staticPath+"/assets")
+
+	// 所有非 /api、非 /health 的路由都回傳 index.html（React Router 用）
+	r.NoRoute(func(c *gin.Context) {
+		path := c.Request.URL.Path
+		// /api/* 路由沒有找到才到這裡，回傳 404 JSON
+		if strings.HasPrefix(path, "/api/") {
+			c.JSON(http.StatusNotFound, gin.H{"error": "API 路由不存在"})
+			return
+		}
+		// 其他所有路由回傳前端 index.html
+		c.File(staticPath + "/index.html")
+	})
+
+	port := os.Getenv("PORT")
+	if port == "" {
+		port = "8080"
+	}
+
+	log.Printf("伺服器啟動，監聽 port %s，靜態檔案路徑：%s", port, staticPath)
+	if err := r.Run(":" + port); err != nil {
 		log.Fatalf("啟動失敗: %v", err)
 	}
 }
