@@ -114,6 +114,12 @@ export default function CreateSurvey() {
       )
     );
 
+  const poolBEntryFeeInvalid =
+    chainPoolMode === "B" &&
+    (!entryFee.trim() ||
+      Number.isNaN(parseFloat(entryFee)) ||
+      parseFloat(entryFee) <= 0);
+
   const removeOption = (qi: number, oi: number) =>
     setQuestions((prev) =>
       prev.map((q, idx) =>
@@ -143,6 +149,11 @@ export default function CreateSurvey() {
       }
     }
     if (chainPoolMode === "B") {
+      const ef = parseFloat(entryFee.trim() || "0");
+      if (!entryFee.trim() || Number.isNaN(ef) || ef <= 0) {
+        toast.error("參與費不可為0");
+        return;
+      }
       for (const q of questions) {
         if (q.questionType !== "single") {
           toast.error("Pool B 僅能建立單選題");
@@ -494,17 +505,17 @@ export default function CreateSurvey() {
                 <div className="border border-border rounded-xl p-4 bg-muted/30 space-y-3">
                   <div className="flex items-center gap-2">
                     <Trophy className="w-4 h-4 text-amber-500" />
-                    <span className="text-sm font-medium">參與費設定（選填）</span>
+                    <span className="text-sm font-medium">參與費設定（必填）</span>
                   </div>
                   <div>
-                    <Label htmlFor="entryFee">參與費 (ETH)</Label>
+                    <Label htmlFor="entryFee">參與費 (ETH) *</Label>
                     <div className="relative mt-1.5">
                       <Input
                         id="entryFee"
                         type="number"
                         step="0.001"
                         min="0"
-                        placeholder="0.01（輸入 0 或留空為免費）"
+                        placeholder="例如 0.01（必須大於 0）"
                         value={entryFee}
                         onChange={(e) => setEntryFee(e.target.value)}
                       />
@@ -750,21 +761,26 @@ export default function CreateSurvey() {
           </Card>
 
           {/* Submit */}
-          <div className="flex gap-4">
-            <Button
-              className="flex-1 gap-2 gradient-primary text-white border-0 h-12 text-base"
-              onClick={handleSubmit}
-              disabled={isCreating || !isConnected}
-            >
-              {isCreating ? (
-                "創建中..."
-              ) : (
-                <>
-                  <Trophy className="w-5 h-5" />
-                  創建問卷
-                </>
-              )}
-            </Button>
+          <div className="flex flex-col gap-2">
+            <div className="flex gap-4">
+              <Button
+                className="flex-1 gap-2 gradient-primary text-white border-0 h-12 text-base"
+                onClick={handleSubmit}
+                disabled={isCreating || !isConnected || poolBEntryFeeInvalid}
+              >
+                {isCreating ? (
+                  "創建中..."
+                ) : (
+                  <>
+                    <Trophy className="w-5 h-5" />
+                    創建問卷
+                  </>
+                )}
+              </Button>
+            </div>
+            {poolBEntryFeeInvalid && (
+              <p className="text-sm text-center text-destructive font-medium">參與費不可為0</p>
+            )}
           </div>
 
           <p className="text-xs text-center text-muted-foreground">
