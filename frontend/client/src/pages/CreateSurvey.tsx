@@ -190,7 +190,7 @@ export default function CreateSurvey() {
         rewardToken: "ETH",
         winnerCount,
         deadline: deadline.getTime(),
-        entryFee: entryFee && parseFloat(entryFee) > 0 ? entryFee : "0",
+        entryFee: chainPoolMode === "A" ? "0" : entryFee && parseFloat(entryFee) > 0 ? entryFee : "0",
         questions: questions.map((q) => ({
           ...q,
           options: q.questionType !== "text" ? q.options.filter((o) => o.trim()) : undefined,
@@ -489,37 +489,44 @@ export default function CreateSurvey() {
                 </div>
               </div>
 
-              {/* 參與費設定 */}
-              <div className="border border-border rounded-xl p-4 bg-muted/30 space-y-3">
-                <div className="flex items-center gap-2">
-                  <Trophy className="w-4 h-4 text-amber-500" />
-                  <span className="text-sm font-medium">參與費設定（選填）</span>
-                </div>
-                <div>
-                  <Label htmlFor="entryFee">參與費 (ETH)</Label>
-                  <div className="relative mt-1.5">
-                    <Input
-                      id="entryFee"
-                      type="number"
-                      step="0.001"
-                      min="0"
-                      placeholder="0.01（輸入 0 或留空為免費）"
-                      value={entryFee}
-                      onChange={(e) => setEntryFee(e.target.value)}
-                    />
-                    <span className="absolute right-3 top-1/2 -translate-y-1/2 text-sm text-muted-foreground font-medium">ETH</span>
+              {/* 參與費：僅 Pool B（betB 需 msg.value）；Pool A 的 voteA 非 payable，不提供參與費 */}
+              {chainPoolMode === "B" ? (
+                <div className="border border-border rounded-xl p-4 bg-muted/30 space-y-3">
+                  <div className="flex items-center gap-2">
+                    <Trophy className="w-4 h-4 text-amber-500" />
+                    <span className="text-sm font-medium">參與費設定（選填）</span>
                   </div>
-                  <p className="text-xs text-muted-foreground mt-1">
-                    參與者需繳納此金額才能加入問卷，繳納的參與費將自動累積到獎金池
-                  </p>
-                </div>
-                {entryFee && parseFloat(entryFee) > 0 && (
-                  <div className="p-2 rounded-lg bg-amber-50 border border-amber-200 text-xs text-amber-800">
-                    <p>⚠️ 參與者需先將 <strong>{entryFee} ETH</strong> 轉入合約才能填寫問卷</p>
-                    <p className="mt-0.5">獎金池 = 初始獎金 + 所有參與者繳納的參與費總和</p>
+                  <div>
+                    <Label htmlFor="entryFee">參與費 (ETH)</Label>
+                    <div className="relative mt-1.5">
+                      <Input
+                        id="entryFee"
+                        type="number"
+                        step="0.001"
+                        min="0"
+                        placeholder="0.01（輸入 0 或留空為免費）"
+                        value={entryFee}
+                        onChange={(e) => setEntryFee(e.target.value)}
+                      />
+                      <span className="absolute right-3 top-1/2 -translate-y-1/2 text-sm text-muted-foreground font-medium">ETH</span>
+                    </div>
+                    <p className="text-xs text-muted-foreground mt-1">
+                      Pool B 參與者透過 <span className="font-mono">betB</span> 下注；金額將累積至獎金池
+                    </p>
                   </div>
-                )}
-              </div>
+                  {entryFee && parseFloat(entryFee) > 0 && (
+                    <div className="p-2 rounded-lg bg-amber-50 border border-amber-200 text-xs text-amber-800">
+                      <p>⚠️ 參與者提交時需以 <span className="font-mono">betB</span> 附上 <strong>{entryFee} ETH</strong>（可依單位數倍乘）</p>
+                    </div>
+                  )}
+                </div>
+              ) : (
+                <div className="border border-border rounded-xl p-4 bg-muted/30 text-xs text-muted-foreground">
+                  <span className="font-medium text-foreground">Pool A：</span>
+                  不設定參與費（合約 <span className="font-mono">voteA</span> 不可收款，僅建立者於{" "}
+                  <span className="font-mono">createPoolA</span> 存入獎金池）。
+                </div>
+              )}
 
               {/* 獎金池預覽 */}
               {rewardAmount && parseFloat(rewardAmount) > 0 && (
@@ -528,11 +535,11 @@ export default function CreateSurvey() {
                     基礎獎金池：
                     <strong className="text-primary ml-1">{rewardAmount} ETH</strong>
                   </p>
-                  {entryFee && parseFloat(entryFee) > 0 && (
+                  {chainPoolMode === "B" && entryFee && parseFloat(entryFee) > 0 && (
                     <p className="text-muted-foreground">
                       每位參與者額外責獻：
                       <strong className="text-amber-600 ml-1">+{entryFee} ETH</strong>
-                      <span className="ml-1 text-xs">(自動累積到獎金池)</span>
+                      <span className="ml-1 text-xs">(betB 累積到獎金池)</span>
                     </p>
                   )}
                   <p className="text-muted-foreground">
@@ -600,6 +607,9 @@ export default function CreateSurvey() {
                 onValueChange={(v) => {
                   const mode = v as ChainPoolMode;
                   setChainPoolMode(mode);
+                  if (mode === "A") {
+                    setEntryFee("");
+                  }
                   if (mode === "B") {
                     setQuestions((prev) => normalizeQuestionsForPoolB(prev));
                   }
@@ -614,7 +624,7 @@ export default function CreateSurvey() {
                     </Label>
                     <p className="text-xs text-muted-foreground leading-relaxed">
                       建立時需附帶初始獎金（ETH），合約為 <span className="font-mono">createPoolA</span>。
-                      參與者鏈上登記為 <span className="font-mono">voteA</span>（與本頁問卷表單為不同層，需另行整合）。
+                      參與者鏈上登記為 <span className="font-mono">voteA</span>（不需參與費，與合約非 payable 一致）。
                     </p>
                   </div>
                 </div>

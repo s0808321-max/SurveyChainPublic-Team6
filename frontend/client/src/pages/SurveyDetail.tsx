@@ -298,6 +298,11 @@ export default function SurveyDetail() {
 
     const fee = parseFloat(survey.entryFee ?? "0");
     const units = Math.max(1, Math.floor(Number(entryFeeUnits)) || 1);
+    const poolAOnChain =
+      survey.poolType === "A" &&
+      survey.contractPoolId != null &&
+      survey.contractPoolId > 0;
+    const poolBWithFee = survey.poolType === "B" && fee > 0;
 
     const answerList = (survey.questions ?? []).map((q) => ({
       questionId: q.id,
@@ -337,11 +342,40 @@ export default function SurveyDetail() {
       let entryFeeTransactionHash: string | undefined;
       let entryFeePaid: string | undefined;
 
-      if (fee > 0) {
+      const contractAddr = survey.contractAddress || CONTRACT_ADDRESS;
+
+      if (poolAOnChain) {
+        const onSepolia = await ensureSepoliaNetwork();
+        if (!onSepolia) return;
+        if (!contractAddr) {
+          toast.error("合約尚未部署");
+          return;
+        }
+        if (!window.ethereum) {
+          toast.error("需要 MetaMask");
+          return;
+        }
+        const { ethers } = await import("ethers");
+        const iface = new ethers.Interface(["function voteA(uint256 _id)"]);
+        const calldata = iface.encodeFunctionData("voteA", [BigInt(survey.contractPoolId!)]);
+        toast.info("請在錢包確認 voteA（不需支付參與費，僅需 Gas）…", { duration: 4000 });
+        const txHash = await window.ethereum.request({
+          method: "eth_sendTransaction",
+          params: [
+            {
+              from: address,
+              to: contractAddr,
+              value: "0x0",
+              data: calldata,
+              gas: "0x30000",
+            },
+          ],
+        }) as string;
+        await waitForTxSuccess(txHash);
+      } else if (poolBWithFee) {
         const onSepolia = await ensureSepoliaNetwork();
         if (!onSepolia) return;
 
-        const contractAddr = survey.contractAddress || CONTRACT_ADDRESS;
         if (!contractAddr) {
           toast.error("合約尚未部署");
           return;
@@ -352,7 +386,6 @@ export default function SurveyDetail() {
         }
 
         const { ethers } = await import("ethers");
-        // ★ 修正：betB 需要 msg.value > 0，entryFee=0 時直接報錯
         const feePerUnit = parseFloat(survey.entryFee ?? "0");
         if (feePerUnit <= 0) {
           toast.error("參與費設定有誤（金額為 0），請聯繫問卷創建者");
@@ -361,45 +394,26 @@ export default function SurveyDetail() {
         const weiTotal = ethers.parseEther(survey.entryFee!) * BigInt(units);
         const weiHex = `0x${weiTotal.toString(16)}`;
 
-        let calldata: string;
-        let gasHex: string;
-        let toastMsg: string;
-
-        if (survey.poolType === "B") {
-          if (!survey.contractPoolId) {
-            toast.error("此問卷尚未綁定鏈上 Pool B ID", {
-              description: "請等待合約交易確認，或由創建者重新綁定 contractPoolId",
-            });
-            return;
-          }
-          const chainQ = getPoolBChainQuestion(survey);
-          const choiceIdx = chainQ
-            ? choiceIndexForBetB(chainQ, answers[chainQ.id]?.optionIds)
-            : null;
-          if (!chainQ || choiceIdx === null) {
-            toast.error("無法建立 betB 交易，請確認選擇題答案");
-            return;
-          }
-          const iface = new ethers.Interface([
-            "function betB(uint256 _id, uint8 _choice) payable",
-          ]);
-          calldata = iface.encodeFunctionData("betB", [BigInt(survey.contractPoolId), choiceIdx]);
-          gasHex = "0x4c4b40";
-          toastMsg = "請在錢包確認 betB（參與費）交易…";
-        } else {
-          if (!survey.contractPoolId) {
-            toast.error("此問卷尚未綁定鏈上 Pool A（contractPoolId）");
-            return;
-          }
-          const iface = new ethers.Interface([
-            "function voteA(uint256 _id)",
-          ]);
-          calldata = iface.encodeFunctionData("voteA", [BigInt(survey.contractPoolId)]);
-          gasHex = "0x30000";
-          toastMsg = "請在錢包確認 voteA（參與費）交易…";
+        if (!survey.contractPoolId) {
+          toast.error("此問卷尚未綁定鏈上 Pool B ID", {
+            description: "請等待合約交易確認，或由創建者重新綁定 contractPoolId",
+          });
+          return;
         }
+        const chainQ = getPoolBChainQuestion(survey);
+        const choiceIdx = chainQ
+          ? choiceIndexForBetB(chainQ, answers[chainQ.id]?.optionIds)
+          : null;
+        if (!chainQ || choiceIdx === null) {
+          toast.error("無法建立 betB 交易，請確認選擇題答案");
+          return;
+        }
+        const iface = new ethers.Interface([
+          "function betB(uint256 _id, uint8 _choice) payable",
+        ]);
+        const calldata = iface.encodeFunctionData("betB", [BigInt(survey.contractPoolId), choiceIdx]);
 
-        toast.info(toastMsg, { duration: 4000 });
+        toast.info("請在錢包確認 betB（參與費）交易…", { duration: 4000 });
         const txHash = await window.ethereum.request({
           method: "eth_sendTransaction",
           params: [
@@ -408,12 +422,11 @@ export default function SurveyDetail() {
               to: contractAddr,
               value: weiHex,
               data: calldata,
-              gas: gasHex,
+              gas: "0x4c4b40",
             },
           ],
         }) as string;
 
-        // ★ 關鍵：等交易確認成功再寫入後端，避免 reverted 仍提交答案
         await waitForTxSuccess(txHash);
 
         entryFeeTransactionHash = txHash;
@@ -424,12 +437,15 @@ export default function SurveyDetail() {
         surveyId,
         walletAddress: address,
         answers: answerList,
-        entryFeePaid: fee > 0 ? entryFeePaid : undefined,
-        entryFeeTransactionHash: fee > 0 ? entryFeeTransactionHash : undefined,
+        entryFeePaid: poolBWithFee ? entryFeePaid : undefined,
+        entryFeeTransactionHash: poolBWithFee ? entryFeeTransactionHash : undefined,
       });
       toast.success("提交成功！", {
-        description:
-          survey.poolType === "B" && fee > 0 ? "betB 已送出，答案已記錄" : "您的答案已記錄，祝您中獎！",
+        description: poolAOnChain
+          ? "voteA 已確認，答案已記錄"
+          : poolBWithFee
+            ? "betB 已送出，答案已記錄"
+            : "您的答案已記錄，祝您中獎！",
       });
       await fetchSurvey();
       await fetchParticipation(true);
@@ -781,7 +797,7 @@ export default function SurveyDetail() {
               <Trophy className="w-6 h-6 text-primary mx-auto mb-1" />
               <p className="text-xl font-bold text-primary">{survey.rewardAmount} ETH</p>
               <p className="text-xs text-muted-foreground">獎金池</p>
-              {parseFloat(survey.entryFee ?? "0") > 0 && (
+              {survey.poolType === "B" && parseFloat(survey.entryFee ?? "0") > 0 && (
                 <p className="text-xs text-amber-600 mt-0.5">參與費: {survey.entryFee} ETH</p>
               )}
             </CardContent>
@@ -1362,8 +1378,8 @@ export default function SurveyDetail() {
                 </div>
               ))}
 
-              {/* 參與費：單位數（提交時一併送鏈上並寫入後端） */}
-              {parseFloat(survey.entryFee ?? "0") > 0 && (
+              {/* 參與費：僅 Pool B（betB）；Pool A 不顯示（合約 voteA 無參與費） */}
+              {survey.poolType === "B" && parseFloat(survey.entryFee ?? "0") > 0 && (
                 <div className="p-4 rounded-xl border-2 border-amber-200 bg-amber-50">
                   <div className="flex items-center gap-2 mb-2">
                     <AlertCircle className="w-5 h-5 text-amber-600" />
@@ -1372,9 +1388,7 @@ export default function SurveyDetail() {
                     </span>
                   </div>
                   <p className="text-xs text-amber-700 mb-3">
-                    {survey.poolType === "B"
-                      ? "此參與費將於提交時以合約 betB 送出（金額 = 單位數 × 每單位），並累積至獎金池。"
-                      : "此參與費將於按下「提交問卷並參與抽獎」時一併送出，並累積至獎金池。"}
+                    此參與費將於提交時以合約 betB 送出（金額 = 單位數 × 每單位），並累積至獎金池。
                   </p>
                   <div className="flex flex-wrap items-end gap-3">
                     <div className="space-y-1">
@@ -1420,7 +1434,10 @@ export default function SurveyDetail() {
                 disabled={
                   isSubmitting ||
                   !isConnected ||
-                  (parseFloat(survey.entryFee ?? "0") > 0 &&
+                  (((survey.poolType === "A" &&
+                    survey.contractPoolId != null &&
+                    survey.contractPoolId > 0) ||
+                    (survey.poolType === "B" && parseFloat(survey.entryFee ?? "0") > 0)) &&
                     !(survey.contractAddress || CONTRACT_ADDRESS))
                 }
               >
