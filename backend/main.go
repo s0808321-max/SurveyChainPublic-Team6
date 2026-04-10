@@ -55,9 +55,11 @@ func main() {
 	// ★ 核心：服務前端靜態檔案
 	// 前端 build 完的檔案在 ../frontend/client/dist
 	// Railway build 時會先 build 前端，所以這個路徑會存在
+	// Railway 會把整個 repo 放在 /app 執行
+	// build 完前端的 dist 在 /app/frontend/client/dist
 	staticPath := os.Getenv("STATIC_PATH")
 	if staticPath == "" {
-		staticPath = "../frontend/client/dist"
+		staticPath = "/app/frontend/client/dist"
 	}
 
 	// 服務靜態資源（JS、CSS、圖片等）
