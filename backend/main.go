@@ -54,11 +54,13 @@ func main() {
 	// Railway 會將實際 port 寫入 PORT，硬寫 :8080 會讓 load balancer 找不到服務
 	port := os.Getenv("PORT")
 	if port == "" {
-		port = "8080" // 本機開發 fallback
-	}
+    port = "8080" // 僅用於本地開發
+}
 
-	log.Printf("Go 後端啟動，監聽 port %s...", port)
-	if err := r.Run(":" + port); err != nil {
-		log.Fatalf("啟動失敗: %v", err)
-	}
+	log.Printf("Go 後端啟動，實際監聽 PORT: %s", port)
+
+	// 注意：在 Railway 部署時，建議直接監聽 "0.0.0.0" 加上該 port
+	if err := r.Run("0.0.0.0:" + port); err != nil {
+    log.Fatalf("啟動失敗: %v", err)
+}
 }
