@@ -4,11 +4,9 @@
  * 前端透過 Vite proxy 將 /api/* 轉發到 Go 後端（port 8080）
  */
 
-// ★ 修正：正式部署時讀取 VITE_API_URL 環境變數作為後端基底網址
-// 本機開發沒有設定時，使用相對路徑 /api（由 vite proxy 轉發到 localhost:8080）
-const BASE = (import.meta.env.VITE_API_URL
-  ? import.meta.env.VITE_API_URL.replace(/\/$/, "") + "/api"
-  : "/api");
+// ★ 直接寫死後端網址，避免環境變數未生效的問題
+// 本機開發時請改回 "/api"
+const BASE = "https://glistening-enchantment-production-5a1c.up.railway.app/api";
 
 // ─── JWT Token 管理 ──────────────────────────────────────────────────────────
 
