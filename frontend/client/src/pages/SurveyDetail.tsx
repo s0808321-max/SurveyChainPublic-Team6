@@ -168,6 +168,9 @@ export default function SurveyDetail() {
   const [revealResult, setRevealResult] = useState<RevealAnswersResponse | null>(null);
   const [correctAnswers, setCorrectAnswers] = useState<Record<number, number[]>>({});
   const [showRevealPanel, setShowRevealPanel] = useState(false);
+  // ★ 新增：Pool B resolveAndDrawB 用的正確答案（0-based 選項索引）
+  const [poolBCorrectAnswer, setPoolBCorrectAnswer] = useState<number | null>(null);
+  const [showPoolBDrawPanel, setShowPoolBDrawPanel] = useState(false);
 
   const [survey, setSurvey] = useState<Survey | null>(null);
   const [isLoading, setIsLoading] = useState(true);
@@ -349,6 +352,12 @@ export default function SurveyDetail() {
         }
 
         const { ethers } = await import("ethers");
+        // ★ 修正：betB 需要 msg.value > 0，entryFee=0 時直接報錯
+        const feePerUnit = parseFloat(survey.entryFee ?? "0");
+        if (feePerUnit <= 0) {
+          toast.error("參與費設定有誤（金額為 0），請聯繫問卷創建者");
+          return;
+        }
         const weiTotal = ethers.parseEther(survey.entryFee!) * BigInt(units);
         const weiHex = `0x${weiTotal.toString(16)}`;
 
@@ -358,7 +367,9 @@ export default function SurveyDetail() {
 
         if (survey.poolType === "B") {
           if (!survey.contractPoolId) {
-            toast.error("此問卷尚未綁定鏈上 Pool B（contractPoolId）");
+            toast.error("此問卷尚未綁定鏈上 Pool B ID", {
+              description: "請等待合約交易確認，或由創建者重新綁定 contractPoolId",
+            });
             return;
           }
           const chainQ = getPoolBChainQuestion(survey);
@@ -446,9 +457,9 @@ export default function SurveyDetail() {
 
     setIsFunding(true);
     try {
-      const fnSelector = "0x5b4b5a6b";
-      const surveyIdHex = surveyId.toString(16).padStart(64, "0");
-      const data = `${fnSelector}${surveyIdHex}`;
+      // ★ 修正：新合約 SurveyChainSystem 沒有 fundSurvey()
+      // Pool A 獎金在 createPoolA 時一併存入，此處改為直接 ETH transfer 補存
+      const data = "0x";
 
       const txHash = await window.ethereum.request({
         method: "eth_sendTransaction",
@@ -492,19 +503,18 @@ export default function SurveyDetail() {
     try {
       let txHash: string;
 
-      if (poolType === "A") {
-        // drawA(uint256 _id)
-        // keccak256("drawA(uint256)") 前 4 bytes = 0x5a47af0e
-        const fnSelector = "0x5a47af0e";
-        const poolIdHex = poolId.toString(16).padStart(64, "0");
-        const calldata = `${fnSelector}${poolIdHex}`;
+      const { ethers: ethersD } = await import("ethers");
 
+      if (poolType === "A") {
+        // ★ 修正：使用 ethers Interface 動態編碼 drawA，避免硬編碼 selector
+        const iface = new ethersD.Interface(["function drawA(uint256 _id)"]);
+        const calldata = iface.encodeFunctionData("drawA", [BigInt(poolId)]);
         txHash = await window.ethereum.request({
           method: "eth_sendTransaction",
           params: [{ from: address, to: contractAddr, data: calldata, gas: "0x50000" }],
         }) as string;
       } else {
-        toast.error("Pool B 抽獎請使用 resolveAndDrawB 流程");
+        toast.error("Pool B 請使用下方「步驟二」觸發 resolveAndDrawB 抽獎");
         return;
       }
 
@@ -629,23 +639,48 @@ export default function SurveyDetail() {
 
     setIsDrawing(true);
     try {
-      // drawA(uint256 _id) — 在合約已過截止時間後呼叫
-      const fnSelector = "0x5a47af0e";
-      const poolIdHex = poolId.toString(16).padStart(64, "0");
-      const lotteryData = `${fnSelector}${poolIdHex}`;
+      const { ethers: ethersQ } = await import("ethers");
+      const poolType = survey.poolType ?? "A";
+      let lotteryTxHash: string;
 
-      const lotteryTxHash = await window.ethereum.request({
-        method: "eth_sendTransaction",
-        params: [{ from: address, to: contractAddr, data: lotteryData, gas: "0x50000" }],
-      }) as string;
+      if (poolType === "A") {
+        // ★ 修正：使用 ethers Interface 動態編碼 drawA
+        const iface = new ethersQ.Interface(["function drawA(uint256 _id)"]);
+        const calldata = iface.encodeFunctionData("drawA", [BigInt(poolId)]);
+        lotteryTxHash = await window.ethereum.request({
+          method: "eth_sendTransaction",
+          params: [{ from: address, to: contractAddr, data: calldata, gas: "0x50000" }],
+        }) as string;
+        toast.info("Chainlink VRF 抽獎請求已送出（Pool A）", {
+          description: "等待 Chainlink 節點回調（約 30-60 秒）",
+          duration: 8000,
+          action: { label: "查看交易", onClick: () => window.open(getEtherscanTxUrl(lotteryTxHash), "_blank") },
+        });
+      } else {
+        // ★ 新增：Pool B 呼叫 resolveAndDrawB(uint256 _id, uint8 _answer)
+        if (poolBCorrectAnswer === null) {
+          toast.error("請先選擇 Pool B 的正確答案（下方選項）");
+          setIsDrawing(false);
+          return;
+        }
+        const iface = new ethersQ.Interface([
+          "function resolveAndDrawB(uint256 _id, uint8 _answer)",
+        ]);
+        const calldata = iface.encodeFunctionData("resolveAndDrawB", [
+          BigInt(poolId),
+          poolBCorrectAnswer,
+        ]);
+        lotteryTxHash = await window.ethereum.request({
+          method: "eth_sendTransaction",
+          params: [{ from: address, to: contractAddr, data: calldata, gas: "0x80000" }],
+        }) as string;
+        toast.info("Pool B resolveAndDrawB 已送出", {
+          description: "合約正在核對答對者並請求 VRF 抽獎，若無人答對則自動退款給創建者",
+          duration: 8000,
+          action: { label: "查看交易", onClick: () => window.open(getEtherscanTxUrl(lotteryTxHash), "_blank") },
+        });
+      }
 
-      toast.info("Chainlink VRF 抽獎請求已送出", {
-        description: "等待 Chainlink 節點回調（約 30-60 秒），回調完成後中獎者將自動收到 ETH",
-        duration: 8000,
-        action: { label: "查看交易", onClick: () => window.open(getEtherscanTxUrl(lotteryTxHash), "_blank") },
-      });
-
-      // ★ 修正：同步後端，不帶 winnerAddresses（等 VRF 回調後由事件監聽器填入）
       await surveyApi.draw(surveyId, {
         callerAddress: address,
         drawTransactionHash: lotteryTxHash,
@@ -1083,17 +1118,80 @@ export default function SurveyDetail() {
                     )}
                   </div>
 
+                  {/* ★ 新增：Pool B 選擇正確答案（resolveAndDrawB 的 _answer 參數）*/}
+                  <div className="space-y-2">
+                    <div className="flex items-center justify-between p-3 bg-white rounded-lg border border-orange-100">
+                      <div>
+                        <p className="text-sm font-medium">步驟二-A：選擇合約正確答案</p>
+                        <p className="text-xs text-muted-foreground">選擇正確選項（0-based 索引），送給合約 resolveAndDrawB</p>
+                      </div>
+                      <Button
+                        size="sm"
+                        onClick={() => setShowPoolBDrawPanel(!showPoolBDrawPanel)}
+                        className="gap-2 bg-orange-600 hover:bg-orange-700 text-white border-0 shrink-0"
+                      >
+                        <BookOpen className="w-4 h-4" />
+                        {showPoolBDrawPanel ? <><ChevronUp className="w-3 h-3" />收起</> : <>選擇答案<ChevronDown className="w-3 h-3" /></>}
+                      </Button>
+                    </div>
+                    {showPoolBDrawPanel && (() => {
+                      const chainQ = (() => {
+                        const qs = [...(survey.questions ?? [])].sort((a, b) => a.orderIndex - b.orderIndex);
+                        for (const q of qs) {
+                          if (q.questionType === "text") continue;
+                          const n = (q.options ?? []).filter((o) => o.optionText?.trim()).length;
+                          if (n >= 2 && n <= 10) return q;
+                        }
+                        return null;
+                      })();
+                      if (!chainQ) return (
+                        <div className="p-3 bg-orange-50 rounded-lg border border-orange-200 text-xs text-orange-800">
+                          找不到符合 Pool B 的選擇題（需 2～10 個選項的單選題）
+                        </div>
+                      );
+                      const sortedOpts = [...(chainQ.options ?? [])].sort((a, b) => a.orderIndex - b.orderIndex);
+                      return (
+                        <div className="p-4 bg-white rounded-xl border border-orange-100 space-y-3">
+                          <p className="text-xs text-muted-foreground">題目：{chainQ.questionText}</p>
+                          <div className="space-y-1.5">
+                            {sortedOpts.map((opt, idx) => (
+                              <button
+                                key={opt.id}
+                                onClick={() => setPoolBCorrectAnswer(idx)}
+                                className={`w-full text-left px-3 py-2 rounded-lg border text-sm transition-all ${
+                                  poolBCorrectAnswer === idx
+                                    ? "border-orange-400 bg-orange-50 text-orange-800 font-medium"
+                                    : "border-border hover:border-orange-300"
+                                }`}
+                              >
+                                <span className={`inline-flex items-center justify-center w-5 h-5 rounded-full border mr-2 text-xs shrink-0 ${
+                                  poolBCorrectAnswer === idx ? "border-orange-500 bg-orange-500 text-white" : "border-muted-foreground"
+                                }`}>{idx}</span>
+                                {opt.optionText}
+                              </button>
+                            ))}
+                          </div>
+                          {poolBCorrectAnswer !== null && (
+                            <p className="text-xs text-orange-700 bg-orange-50 border border-orange-200 rounded-lg p-2">
+                              已選：索引 {poolBCorrectAnswer}「{sortedOpts[poolBCorrectAnswer]?.optionText}」
+                            </p>
+                          )}
+                        </div>
+                      );
+                    })()}
+                  </div>
+
                   <div className="flex items-center justify-between p-3 bg-white rounded-lg border border-purple-100">
                     <div>
-                      <p className="text-sm font-medium">步驟二：觸發 Chainlink VRF 抽獎</p>
+                      <p className="text-sm font-medium">步驟二-B：觸發 resolveAndDrawB 抽獎</p>
                       <p className="text-xs text-muted-foreground">
-                        從 {revealResult?.qualifiedCount ?? "?"} 位完全答對者中抽出 {survey.winnerCount} 位中獎者
+                        合約篩選答對者並觸發 VRF 抽出 {survey.winnerCount} 位中獎者
                       </p>
                     </div>
                     <Button
                       size="sm"
                       onClick={handleDrawFromQualified}
-                      disabled={isDrawing || (revealResult?.qualifiedCount ?? 0) === 0}
+                      disabled={isDrawing || poolBCorrectAnswer === null}
                       className="gap-2 bg-purple-600 hover:bg-purple-700 text-white border-0"
                     >
                       <Shuffle className="w-4 h-4" />
@@ -1323,10 +1421,7 @@ export default function SurveyDetail() {
                   isSubmitting ||
                   !isConnected ||
                   (parseFloat(survey.entryFee ?? "0") > 0 &&
-                    !(survey.contractAddress || CONTRACT_ADDRESS)) ||
-                  (parseFloat(survey.entryFee ?? "0") > 0 &&
-                    survey.poolType === "B" &&
-                    !survey.contractPoolId)
+                    !(survey.contractAddress || CONTRACT_ADDRESS))
                 }
               >
                 {isSubmitting ? "提交中..." : "提交問卷並參與抽獎"}
